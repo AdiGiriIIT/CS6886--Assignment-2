@@ -5,18 +5,22 @@ num_workers: 2
 pin_memory: true
 
 model:
+  # Public torchvision ImageNet-1K V2 initialization; classifier is replaced for CIFAR-10.
+  pretrained: true
+  num_classes: 10
   width_mult: 1.0
   dropout: 0.2
-  bn_momentum: 0.1
 
 training:
-  epochs: 100
+  epochs: 20
   batch_size: 128
-  learning_rate: 0.05
+  learning_rate: 0.01
   momentum: 0.9
   weight_decay: 0.00004
   label_smoothing: 0.0
   scheduler: cosine
+  # Train the randomly initialized CIFAR-10 head first, then fine-tune all layers.
+  freeze_backbone_epochs: 2
 
 output:
   run_name: baseline

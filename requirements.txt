@@ -1,4 +1,6 @@
-torch>=2.2,<2.7
-torchvision>=0.17,<0.22
+# Colab already supplies a CUDA-compatible torch/torchvision build. Do not replace
+# it with a CPU wheel there; install torch and torchvision only on a local machine.
+torch>=2.2
+torchvision>=0.17
 PyYAML>=6.0,<7.0
 matplotlib>=3.7,<4.0

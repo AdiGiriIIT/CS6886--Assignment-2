@@ -27,7 +27,7 @@ def main() -> None:
     device = resolve_device(args.device)
     _, test_loader = build_cifar10_loaders(args.data_dir, args.batch_size, args.num_workers,
                                            device.type == "cuda", config["seed"])
-    model = build_model(checkpoint["model_config"]).to(device)
+    model = build_model(checkpoint["model_config"], load_pretrained=False).to(device)
     model.load_state_dict(checkpoint["state_dict"])
     loss, accuracy = run_epoch(model, test_loader, nn.CrossEntropyLoss(), device)
     print(f"Checkpoint: {args.checkpoint}\nTest loss: {loss:.4f}\nTest top-1 accuracy: {accuracy:.2f}%")

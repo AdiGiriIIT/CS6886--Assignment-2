@@ -1,6 +1,6 @@
 # CS6886 Assignment 2 — MobileNetV2 on CIFAR-10
 
-This repository trains a CIFAR-10-adapted MobileNetV2 baseline and keeps training,
+This repository fine-tunes torchvision's ImageNet-pretrained MobileNetV2 on CIFAR-10 and keeps training,
 evaluation, and compression code separate. It is designed to run unchanged on a
 CPU machine or a Colab GPU; CUDA is selected automatically when available.
 
@@ -11,7 +11,8 @@ Use Python 3.10+ (Colab's current Python runtime is suitable).
 ```bash
 git clone <YOUR_GITHUB_REPOSITORY_URL>
 cd assignment-2
-python -m pip install -r requirements.txt
+# Colab already includes CUDA-enabled torch and torchvision.
+python -m pip install PyYAML matplotlib
 ```
 
 For a Colab GPU session, clone the repository in a cell, install the requirements,
@@ -25,14 +26,14 @@ epoch on a small fixed number of batches, writes a checkpoint, and verifies the
 whole data/model/training path.
 
 ```bash
-python -m src.train --config configs/baseline.yaml --epochs 1 --max-train-batches 5 --max-val-batches 2 --run-name sanity
+python -m src.train --config configs/baseline.yaml --device cuda --epochs 1 --max-train-batches 5 --max-val-batches 2 --run-name sanity
 ```
 
 Train the full baseline configured in YAML:
 
 ```bash
-python -m src.train --config configs/baseline.yaml
-python -m src.evaluate --checkpoint results/checkpoints/baseline.pt
+python -m src.train --config configs/baseline.yaml --device cuda
+python -m src.evaluate --checkpoint results/checkpoints/baseline.pt --device cuda
 ```
 
 The compression entry point is intentionally separate from training and evaluation.
@@ -49,11 +50,14 @@ python -m src.compress --checkpoint results/checkpoints/baseline.pt --weight-bit
   `RandomHorizontalFlip()`, `ToTensor()`, and CIFAR-10 channel normalization
   (mean `(0.4914, 0.4822, 0.4465)`, std `(0.2470, 0.2435, 0.2616)`). Test data
   uses only tensor conversion and the same normalization.
-* **Model:** MobileNetV2 is adapted for 32×32 inputs by using a 3×3, stride-1
-  stem and omitting ImageNet's initial downsampling. The YAML default uses width
-  multiplier 1.0, dropout 0.2, BatchNorm momentum 0.1, and a 10-class classifier.
-* **Training:** SGD with Nesterov momentum, weight decay, cosine LR scheduling,
-  and an explicit seed. See `configs/baseline.yaml` for all values.
+* **Model:** torchvision's official MobileNetV2 is initialized with public
+  `IMAGENET1K_V2` weights, adapted for 32×32 inputs with a stride-1 stem, and
+  given a newly initialized 10-class classifier. The YAML default uses width
+  multiplier 1.0 and dropout 0.2.
+* **Training:** the new classifier is warmed up for two epochs with the pretrained
+  backbone frozen, then all layers are fine-tuned using SGD with Nesterov momentum,
+  weight decay, cosine LR scheduling, and an explicit seed. See
+  `configs/baseline.yaml` for all values.
 
 Every checkpoint stores its model configuration and normalization metadata, so
 `src.evaluate` can reconstruct the exact architecture. Each training run writes a

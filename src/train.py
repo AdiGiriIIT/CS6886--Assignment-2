@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from .data import CIFAR10_MEAN, CIFAR10_STD, build_cifar10_loaders
-from .models import build_model
+from .models import build_model, freeze_backbone
 from .utils import append_csv, ensure_parent, load_config, resolve_device, save_history_plot, set_seed
 
 
@@ -42,6 +42,8 @@ def run_epoch(model, loader, criterion, device, optimizer=None, max_batches: int
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/baseline.yaml")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"),
+                        help="Override config device; use cuda to fail fast without a GPU.")
     parser.add_argument("--epochs", type=int, help="Override YAML epoch count.")
     parser.add_argument("--run-name", help="Override output.run_name.")
     parser.add_argument("--max-train-batches", type=int, help="Limit batches for a smoke test.")
@@ -52,6 +54,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
+    if args.device is not None:
+        config["device"] = args.device
     if args.epochs is not None:
         config["training"]["epochs"] = args.epochs
     if args.run_name is not None:
@@ -69,6 +73,10 @@ def main() -> None:
                                 nesterov=True)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=train_cfg["epochs"])
     criterion = nn.CrossEntropyLoss(label_smoothing=train_cfg["label_smoothing"])
+    freeze_epochs = train_cfg.get("freeze_backbone_epochs", 0) if config["model"].get("pretrained", False) else 0
+    if freeze_epochs:
+        freeze_backbone(model, freeze=True)
+        print(f"Using ImageNet-pretrained MobileNetV2: backbone frozen for {freeze_epochs} warm-up epoch(s).")
     output = config["output"]
     run_name = output["run_name"]
     history_path = Path(output["curve_dir"]) / f"{run_name}.csv"
@@ -77,6 +85,9 @@ def main() -> None:
     best_accuracy = -1.0
     print(f"Device: {device}; parameters: {sum(p.numel() for p in model.parameters()):,}")
     for epoch in range(1, train_cfg["epochs"] + 1):
+        if epoch == freeze_epochs + 1 and freeze_epochs:
+            freeze_backbone(model, freeze=False)
+            print("Backbone unfrozen; fine-tuning all MobileNetV2 layers.")
         start = perf_counter()
         train_loss, train_accuracy = run_epoch(model, train_loader, criterion, device, optimizer, args.max_train_batches)
         val_loss, val_accuracy = run_epoch(model, val_loader, criterion, device, max_batches=args.max_val_batches)
