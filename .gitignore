@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+data/
+results/checkpoints/*.pt
+results/checkpoints/*.pth
+results/curves/*.csv
+results/curves/*.png
+results/metrics.csv

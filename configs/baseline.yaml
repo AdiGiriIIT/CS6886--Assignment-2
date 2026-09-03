@@ -1,0 +1,25 @@
+seed: 6886
+device: auto
+data_dir: data
+num_workers: 2
+pin_memory: true
+
+model:
+  width_mult: 1.0
+  dropout: 0.2
+  bn_momentum: 0.1
+
+training:
+  epochs: 100
+  batch_size: 128
+  learning_rate: 0.05
+  momentum: 0.9
+  weight_decay: 0.00004
+  label_smoothing: 0.0
+  scheduler: cosine
+
+output:
+  run_name: baseline
+  checkpoint_dir: results/checkpoints
+  curve_dir: results/curves
+  metrics_file: results/metrics.csv

@@ -1,0 +1,4 @@
+# Reserved for the custom quantization experiments implemented in the next phase.
+checkpoint: results/checkpoints/baseline.pt
+weight_bits: 8
+activation_bits: 8
