@@ -1,33 +1,41 @@
-"""Inspect a checkpoint and record a requested custom-compression configuration."""
-
+"""Run Day-1 quantization coverage/accounting diagnostics on a checkpoint."""
 from __future__ import annotations
-
 import argparse
-
+import json
+from pathlib import Path
 import torch
-
-from .compression import checkpoint_size_mb, count_parameter_bits
-
+from torch import nn
+from .compression import build_quantized_model, checkpoint_size_mb, coverage_rows, weight_size_breakdown
+from .data import build_cifar10_loaders
+from .models import build_model
+from .train import run_epoch
+from .utils import resolve_device, set_seed
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", default="results/checkpoints/baseline.pt")
-    parser.add_argument("--weight-bits", "--weight_bits", dest="weight_bits", type=int, required=True)
-    parser.add_argument("--activation-bits", "--activation_bits", dest="activation_bits", type=int, required=True)
+    parser.add_argument("--weight-bits", type=int, required=True); parser.add_argument("--activation-bits", type=int, required=True)
+    parser.add_argument("--coverage-file", default="results/tables/quantization_coverage.json")
+    parser.add_argument("--evaluate", action="store_true", help="Evaluate the fake-quantized PTQ diagnostic.")
+    parser.add_argument("--batch-size", type=int, default=256); parser.add_argument("--data-dir", default="data")
+    parser.add_argument("--device", default="auto"); parser.add_argument("--num-workers", type=int, default=2)
     args = parser.parse_args()
-    if not (1 <= args.weight_bits <= 32 and 1 <= args.activation_bits <= 32):
-        parser.error("bit widths must be between 1 and 32")
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    baseline_bits = count_parameter_bits(checkpoint["state_dict"], 32)
-    requested_bits = count_parameter_bits(checkpoint["state_dict"], args.weight_bits)
-    print(f"Checkpoint: {args.checkpoint}")
-    print(f"Serialized baseline checkpoint: {checkpoint_size_mb(args.checkpoint):.2f} MB")
-    print(f"Weight payload estimate: {baseline_bits / 8 / 1024 ** 2:.2f} MB at fp32")
-    print(f"Requested payload estimate: {requested_bits / 8 / 1024 ** 2:.2f} MB at {args.weight_bits}-bit")
-    print(f"Ideal weight-payload ratio (metadata excluded): {baseline_bits / requested_bits:.2f}x")
-    print(f"Activation bit width requested: {args.activation_bits}")
-    print("No model was modified: custom quantization will be implemented in src/compression.py.")
+    base = build_model(checkpoint["model_config"], load_pretrained=False); base.load_state_dict(checkpoint["state_dict"])
+    rows = coverage_rows(base, args.weight_bits, args.activation_bits)
+    Path(args.coverage_file).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.coverage_file).write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+    size = weight_size_breakdown(base, args.weight_bits)
+    print(f"Checkpoint: {args.checkpoint}\nSerialized training artifact: {checkpoint_size_mb(args.checkpoint):.2f} MiB")
+    print(f"Coverage: {len(rows)} Conv2d/Linear tensors; written to {args.coverage_file}")
+    print(f"Conservative deployable weight estimate: {size.compressed_bytes} bytes ({size.compressed_bytes / 2**20:.3f} MiB)")
+    print(f"FP32 deployable weight state: {size.fp32_weight_bytes} bytes; ratio: {size.ratio:.3f}x")
+    print("Known Day-1 limitation: residual-add/input/projection boundaries are not yet requantized; do not use this as a final deployment result.")
+    if args.evaluate:
+        set_seed(checkpoint["config"]["seed"]); device = resolve_device(args.device)
+        model = build_quantized_model(base, args.weight_bits, args.activation_bits).to(device).eval()
+        _, test_loader = build_cifar10_loaders(args.data_dir, args.batch_size, args.num_workers, device.type == "cuda", checkpoint["config"]["seed"])
+        loss, accuracy = run_epoch(model, test_loader, nn.CrossEntropyLoss(), device)
+        print(f"PTQ diagnostic test loss: {loss:.4f}; top-1 accuracy: {accuracy:.2f}%")
 
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()

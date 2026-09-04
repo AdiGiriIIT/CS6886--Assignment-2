@@ -36,13 +36,26 @@ python -m src.train --config configs/baseline.yaml --device cuda
 python -m src.evaluate --checkpoint results/checkpoints/baseline.pt --device cuda
 ```
 
-The compression entry point is intentionally separate from training and evaluation.
-It currently validates a saved checkpoint and reports the configuration that will be
-used by the custom quantization implementation in the next assignment phase:
+Day 1 compression diagnostics use from-scratch fake quantization (no framework
+quantization APIs), write an all-layer coverage audit, and produce conservative
+packed-weight accounting. `--evaluate` performs the PTQ diagnostic; it is not a
+final deployment claim because residual requantization is deliberately still a
+correctness gate for the next stage.
 
 ```bash
-python -m src.compress --checkpoint results/checkpoints/baseline.pt --weight-bits 8 --activation-bits 8
+python -m src.compress --checkpoint results/checkpoints/baseline.pt --weight-bits 8 --activation-bits 8 --evaluate --device cuda
+
+# Short correctness pilots, both initialized directly from baseline.pt.
+python -m src.qat --checkpoint results/checkpoints/baseline.pt --weight-bits 8 --activation-bits 8 --epochs 2 --device cuda
+python -m src.qat --checkpoint results/checkpoints/baseline.pt --weight-bits 6 --activation-bits 6 --epochs 2 --device cuda
+
+# Mathematics, packing, folding, and accounting gates.
+python -m unittest discover -s tests -v
 ```
+
+`results/tables/baseline_manifest.json` records the required SHA-256 of the
+immutable checkpoint. Verify it before any sweep with `sha256sum
+results/checkpoints/baseline.pt`.
 
 ## Baseline design
 

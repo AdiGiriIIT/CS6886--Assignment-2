@@ -1,0 +1,3 @@
+run_name,best_test_accuracy,checkpoint,epochs,seed
+sanity,26.953,results/checkpoints/sanity.pt,1,6886
+baseline,92.690,results/checkpoints/baseline.pt,20,6886

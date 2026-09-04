@@ -1,0 +1,158 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[a4paper,margin=1in,top=1.25in]{geometry}
+\usepackage{setspace}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue,urlcolor=blue]{hyperref}
+
+\graphicspath{{results/curves/}{upload/}}
+\setstretch{1.08}
+
+\title{
+    \vspace{2cm}
+    \textbf{\Huge Systems Engineering for Deep Learning}\\[0.5cm]
+    \textbf{\Large Assignment 2}\\[0.2cm]
+    \large Course Code: CS6886
+}
+\author{
+    \textbf{\Large Aditya Girish}\\[0.2cm]
+    Roll No: \texttt{EP23B048}\\[0.2cm]
+    B.Tech Engineering Physics\\[0.2cm]
+    IIT Madras
+}
+\date{September 2026}
+
+\begin{document}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.25\linewidth]{image.png}
+\end{figure}
+
+\maketitle
+\thispagestyle{empty}
+\newpage
+
+\section{Question 1: Training Baseline}
+
+\subsection{CIFAR-10 pipeline}
+
+The CIFAR-10 training set contains 50,000 images and the test set contains
+10,000 images, each with spatial resolution $32\times32$ and one of ten
+classes. The training pipeline used the following augmentation and
+normalization sequence:
+\begin{enumerate}
+    \item \texttt{RandomCrop(32, padding=4)},
+    \item \texttt{RandomHorizontalFlip()},
+    \item conversion to a tensor, and
+    \item channel-wise normalization using CIFAR-10 mean
+    $(0.4914, 0.4822, 0.4465)$ and standard deviation
+    $(0.2470, 0.2435, 0.2616)$.
+\end{enumerate}
+For testing, no random augmentation was applied; images were converted to
+tensors and normalized using the same mean and standard deviation. A fixed
+seed of 6886 was used for reproducibility.
+
+\subsection{Model and training strategy}
+
+The baseline is torchvision's MobileNetV2 initialized using the public
+ImageNet-1K V2 pretrained weights. The first convolutional layer was adapted
+to stride 1 (rather than ImageNet's initial stride 2) to preserve useful
+spatial resolution for $32\times32$ CIFAR-10 inputs. The original ImageNet
+classifier was replaced by a newly initialized linear layer with 10 outputs.
+The width multiplier was 1.0, dropout probability was 0.2, and the standard
+torchvision BatchNorm2d settings were retained (including momentum 0.1).
+
+The new classifier was trained for the first two epochs while the pretrained
+feature extractor was frozen. The entire network was then unfrozen and
+fine-tuned end-to-end for the remaining 18 epochs. Training used minibatches
+of 128, SGD with Nesterov momentum (momentum 0.9), initial learning rate 0.01,
+weight decay $4\times10^{-5}$, and a cosine-annealing learning-rate schedule
+over 20 epochs. Cross-entropy loss was used without label smoothing.
+
+\subsection{Results}
+
+Table~\ref{tab:baseline-results} reports the main baseline result. The best
+checkpoint was selected by test top-1 accuracy; it occurred at epoch 19. The
+last epoch achieved a nearly identical test accuracy of 92.66\%, showing that
+the result is not due to a single unstable epoch.
+
+\begin{table}[H]
+    \centering
+    \caption{Uncompressed pretrained-MobileNetV2 baseline on CIFAR-10.}
+    \label{tab:baseline-results}
+    \begin{tabular}{lc}
+        \toprule
+        Metric & Value \\
+        \midrule
+        Number of training epochs & 20 \\
+        Best test top-1 accuracy & \textbf{92.69\%} \\
+        Epoch of best checkpoint & 19 \\
+        Final-epoch train accuracy & 97.06\% \\
+        Final-epoch test accuracy & 92.66\% \\
+        Best test loss & 0.2401 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Figure~\ref{fig:baseline-curves} shows the training and test curves. The
+accuracy rises quickly after the pretrained backbone is unfrozen at epoch 3:
+test accuracy increases from 62.07\% at epoch 2 to 84.59\% at epoch 3. It then
+improves steadily and plateaus around 92--93\% after approximately 14 epochs.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.94\linewidth]{baseline.png}
+    \caption{Training and test loss and top-1 accuracy for the uncompressed
+    pretrained MobileNetV2 baseline.}
+    \label{fig:baseline-curves}
+\end{figure}
+
+\subsection{Failure modes and limitations}
+
+The curves indicate mild overfitting late in training: final training accuracy
+is 97.06\% while final test accuracy is 92.66\%, a gap of approximately 4.4
+percentage points. Test loss reaches its minimum at epoch 19 and is essentially
+flat thereafter, whereas training loss continues to decrease. Consequently,
+substantially extending this schedule is unlikely to improve generalization
+without stronger regularization or additional augmentation. A second practical
+failure mode is accidental CPU execution in a hosted notebook environment;
+training must be run with CUDA available and the recorded device should be
+checked before a long run. Finally, this baseline uses ImageNet-pretrained
+weights, so its accuracy should be interpreted as transfer-learning performance
+rather than accuracy obtained by training MobileNetV2 from random
+initialization.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\end{document}

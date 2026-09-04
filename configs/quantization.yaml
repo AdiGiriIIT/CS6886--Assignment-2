@@ -1,4 +1,9 @@
-# Reserved for the custom quantization experiments implemented in the next phase.
+# Day-1 diagnostic/pilot defaults. QAT always reloads this checkpoint from disk.
 checkpoint: results/checkpoints/baseline.pt
 weight_bits: 8
 activation_bits: 8
+qat:
+  epochs: 2
+  learning_rate: 0.0001
+  # Future full runs should use the documented 8 -> 6 -> target transition.
+  seed: 6886
