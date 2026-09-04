@@ -53,6 +53,21 @@ python -m src.qat --checkpoint results/checkpoints/baseline.pt --weight-bits 6 -
 python -m unittest discover -s tests -v
 ```
 
+## Day 2 QAT sweep
+
+Use [the Day 2 notebook](notebooks/day2-qat-sweep.ipynb) for Kaggle. Open one
+copy per available GPU and assign one independent candidate to each: W8A8,
+W6A6, W4A6, and W4A4. It runs the correctness gates first, uses `tee` to retain
+the terminal logs, and creates immutable metadata under
+`experiments/sweeps/<run-name>/`. Candidate commands are also listed in
+`configs/sweeps/day2_candidates.md`.
+
+The QAT wrapper now quantizes the signed model input/logit boundaries and each
+MobileNetV2 residual addition with a shared learned scale for both operands.
+It is still fake quantization: reported storage is an accounting estimate, not
+a latency claim. Do not compare a training checkpoint file size to the packed
+weight size.
+
 `results/tables/baseline_manifest.json` records the required SHA-256 of the
 immutable checkpoint. Verify it before any sweep with `sha256sum
 results/checkpoints/baseline.pt`.

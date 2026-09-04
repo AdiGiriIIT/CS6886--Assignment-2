@@ -6,7 +6,38 @@ from dataclasses import dataclass
 from pathlib import Path
 import torch
 from torch import nn
-from .quantization import QuantizedConv2d, QuantizedLinear, QuantizedReLU6, integer_range
+from .quantization import (ActivationFakeQuantizer, QuantizedConv2d,
+                           QuantizedLinear, QuantizedReLU6, QuantizedResidualAdd,
+                           integer_range)
+
+
+class QuantizedInvertedResidual(nn.Module):
+    """Torchvision MobileNetV2 residual block with an explicit quantized add."""
+    def __init__(self, module: nn.Module, activation_bits: int):
+        super().__init__()
+        self.conv = module.conv
+        self.use_res_connect = module.use_res_connect
+        self.residual_add = QuantizedResidualAdd(activation_bits) if self.use_res_connect else None
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        branch = self.conv(value)
+        return self.residual_add(value, branch) if self.use_res_connect else branch
+
+
+class QuantizedMobileNet(nn.Module):
+    """Model-level boundaries which are not represented by a torchvision module."""
+    def __init__(self, model: nn.Module, activation_bits: int, edge_bits: int | None = None):
+        super().__init__()
+        self.model = model
+        edge = activation_bits if edge_bits is None else edge_bits
+        self.input_quantizer = ActivationFakeQuantizer(edge, signed=True)
+        self.logit_quantizer = ActivationFakeQuantizer(edge, signed=True)
+        if edge_bits is not None:
+            self.input_quantizer.fixed_bits = True
+            self.logit_quantizer.fixed_bits = True
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        return self.logit_quantizer(self.model(self.input_quantizer(value)))
 
 def checkpoint_size_mb(path: str | Path) -> float: return Path(path).stat().st_size / (1024 ** 2)
 def count_parameter_bits(state_dict: dict[str, torch.Tensor], bits_per_value: int = 32) -> int:
@@ -41,21 +72,23 @@ def fold_conv_bn(conv: nn.Conv2d, batch_norm: nn.BatchNorm2d) -> nn.Conv2d:
     folded.bias.data.copy_(batch_norm.bias + (folded.bias - batch_norm.running_mean) * scale)
     return folded
 
-def build_quantized_model(model: nn.Module, weight_bits: int, activation_bits: int) -> nn.Module:
-    """Clone and replace every Conv/Linear and post-ReLU6 boundary.
-
-    Residual additions deliberately remain FP32 in this Day-1 diagnostic wrapper.
-    The coverage report exposes that limitation; deployable residual requantization
-    remains a Day-2 implementation gate.
-    """
+def build_quantized_model(model: nn.Module, weight_bits: int, activation_bits: int,
+                          edge_bits: int | None = None) -> nn.Module:
+    """Clone MobileNetV2 and simulate all weight, ReLU6, and residual boundaries."""
     model = copy.deepcopy(model)
     def replace(parent: nn.Module) -> None:
         for name, child in list(parent.named_children()):
-            if isinstance(child, nn.Conv2d): setattr(parent, name, QuantizedConv2d(child, weight_bits))
+            # Importing torchvision's private class is unnecessary: this public
+            # structural contract identifies its MobileNetV2 residual blocks.
+            if hasattr(child, "use_res_connect") and hasattr(child, "conv"):
+                replace(child.conv)
+                setattr(parent, name, QuantizedInvertedResidual(child, activation_bits))
+            elif isinstance(child, nn.Conv2d): setattr(parent, name, QuantizedConv2d(child, weight_bits))
             elif isinstance(child, nn.Linear): setattr(parent, name, QuantizedLinear(child, weight_bits))
             elif isinstance(child, nn.ReLU6): setattr(parent, name, QuantizedReLU6(activation_bits))
             else: replace(child)
-    replace(model); return model
+    replace(model)
+    return QuantizedMobileNet(model, activation_bits, edge_bits)
 
 def coverage_rows(model: nn.Module, weight_bits: int, activation_bits: int) -> list[dict[str, object]]:
     return [{"name": name, "kind": type(module).__name__, "weight_shape": list(module.weight.shape), "weight_bits": weight_bits, "scale_shape": [module.weight.shape[0]], "weight_signed": True, "activation_bits": activation_bits, "exception_reason": "none"}

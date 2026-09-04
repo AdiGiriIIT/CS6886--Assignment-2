@@ -14,9 +14,14 @@ from .models import build_model, freeze_backbone
 from .utils import append_csv, ensure_parent, load_config, resolve_device, save_history_plot, set_seed
 
 
-def run_epoch(model, loader, criterion, device, optimizer=None, max_batches: int | None = None) -> tuple[float, float]:
+def run_epoch(model, loader, criterion, device, optimizer=None, max_batches: int | None = None,
+              keep_batch_norm_eval: bool = False) -> tuple[float, float]:
     is_training = optimizer is not None
     model.train(is_training)
+    if is_training and keep_batch_norm_eval:
+        for module in model.modules():
+            if isinstance(module, nn.modules.batchnorm._BatchNorm):
+                module.eval()
     total_loss = total_correct = total_examples = 0
     context = torch.enable_grad() if is_training else torch.no_grad()
     with context:

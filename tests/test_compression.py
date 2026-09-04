@@ -3,7 +3,8 @@ import unittest
 import torch
 from torch import nn
 from src.compression import fold_conv_bn, pack_signed, unpack_signed, weight_size_breakdown
-from src.quantization import fake_quantize, integer_range, lsq_scale_init
+from src.qat import precision_for_epoch
+from src.quantization import QuantizedResidualAdd, fake_quantize, integer_range, lsq_scale_init
 
 class CompressionTests(unittest.TestCase):
     def test_ranges_and_levels(self):
@@ -24,5 +25,14 @@ class CompressionTests(unittest.TestCase):
         torch.manual_seed(1); conv, bn = nn.Conv2d(3, 4, 3, bias=False), nn.BatchNorm2d(4)
         conv.eval(); bn.eval(); x = torch.randn(2, 3, 8, 8); self.assertTrue(torch.allclose(bn(conv(x)), fold_conv_bn(conv, bn)(x), atol=1e-5))
         size = weight_size_breakdown(conv, 4); self.assertEqual(size.packed_weight_bytes, math.ceil(conv.weight.numel() / 2)); self.assertGreater(size.compressed_bytes, size.packed_weight_bytes)
+
+    def test_residual_add_uses_one_signed_scale_and_transition(self):
+        add = QuantizedResidualAdd(4)
+        result = add(torch.tensor([-1.0]), torch.tensor([2.0]))
+        self.assertEqual(tuple(result.shape), (1,))
+        self.assertEqual(len(list(add.parameters())), 1)
+        self.assertEqual(precision_for_epoch(1, 4, 4, 1), (8, 8))
+        self.assertEqual(precision_for_epoch(2, 4, 4, 1), (6, 6))
+        self.assertEqual(precision_for_epoch(3, 4, 4, 1), (4, 4))
 
 if __name__ == "__main__": unittest.main()

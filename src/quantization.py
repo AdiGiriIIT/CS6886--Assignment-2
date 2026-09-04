@@ -74,3 +74,29 @@ class QuantizedReLU6(nn.Module):
     def __init__(self, bits: int):
         super().__init__(); self.activation_quantizer = ActivationFakeQuantizer(bits, False, 6.0 / (2 ** bits - 1))
     def forward(self, value: torch.Tensor) -> torch.Tensor: return self.activation_quantizer(F.relu6(value))
+
+
+class QuantizedResidualAdd(nn.Module):
+    """Fake-quantize both operands to one learned signed boundary scale.
+
+    Keeping one scale for the two operands makes the simulated add faithful to
+    the simple integer deployment policy: both integer tensors can be added
+    directly, then requantized at the same block-output boundary.
+    """
+    def __init__(self, bits: int):
+        super().__init__()
+        self.activation_quantizer = ActivationFakeQuantizer(bits, signed=True)
+
+    def forward(self, skip: torch.Tensor, branch: torch.Tensor) -> torch.Tensor:
+        quantizer = self.activation_quantizer
+        return quantizer(quantizer(skip) + quantizer(branch))
+
+
+def set_quantizer_bits(module: nn.Module, weight_bits: int, activation_bits: int) -> None:
+    """Apply a precision-transition step without replacing learned scales."""
+    for child in module.modules():
+        if isinstance(child, WeightFakeQuantizer):
+            child.bits = weight_bits
+        elif isinstance(child, ActivationFakeQuantizer):
+            if not getattr(child, "fixed_bits", False):
+                child.bits = activation_bits
