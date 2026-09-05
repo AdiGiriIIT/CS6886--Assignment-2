@@ -9,6 +9,6 @@ results/checkpoints/*.pth
 results/curves/*.csv
 results/curves/*.png
 results/metrics.csv
-day1_artifacts/
+*artifacts/
 
 
