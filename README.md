@@ -55,7 +55,7 @@ python -m unittest discover -s tests -v
 
 ## Day 2 QAT sweep
 
-Use [the Day 2 notebook](notebooks/day2-qat-sweep.ipynb) for Kaggle. Open one
+Use [the Day 2 notebook](notebooks/day2-quantize-sweep.ipynb) for Kaggle. Open one
 copy per available GPU and assign one independent candidate to each: W8A8,
 W6A6, W4A6, and W4A4. It runs the correctness gates first, uses `tee` to retain
 the terminal logs, and creates immutable metadata under
@@ -74,10 +74,14 @@ results/checkpoints/baseline.pt`.
 
 ## Baseline design
 
-* **Data:** CIFAR-10 train transform is `RandomCrop(32, padding=4)`,
-  `RandomHorizontalFlip()`, `ToTensor()`, and CIFAR-10 channel normalization
-  (mean `(0.4914, 0.4822, 0.4465)`, std `(0.2470, 0.2435, 0.2616)`). Test data
-  uses only tensor conversion and the same normalization.
+* **Data:** a seed-6886 permutation makes a fixed 45,000/5,000
+  train/validation split from CIFAR-10's official 50,000-example training set.
+  Training uses `RandomCrop(32, padding=4)`, `RandomHorizontalFlip()`,
+  `ToTensor()`, and CIFAR-10 channel normalization (mean `(0.4914, 0.4822,
+  0.4465)`, std `(0.2470, 0.2435, 0.2616)`). Validation and the official test
+  set use only tensor conversion and the same normalization. Checkpoints are
+  selected on validation; invoke `src.evaluate` once the checkpoint is selected
+  to measure held-out test accuracy.
 * **Model:** torchvision's official MobileNetV2 is initialized with public
   `IMAGENET1K_V2` weights, adapted for 32×32 inputs with a stride-1 stem, and
   given a newly initialized 10-class classifier. The YAML default uses width

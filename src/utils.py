@@ -61,10 +61,10 @@ def save_history_plot(history_path: str | Path, plot_path: str | Path) -> None:
     epochs = [int(row["epoch"]) for row in rows]
     figure, axes = plt.subplots(1, 2, figsize=(10, 4))
     axes[0].plot(epochs, [float(row["train_loss"]) for row in rows], label="train")
-    axes[0].plot(epochs, [float(row["val_loss"]) for row in rows], label="test")
+    axes[0].plot(epochs, [float(row["val_loss"]) for row in rows], label="validation")
     axes[0].set(title="Loss", xlabel="Epoch", ylabel="Cross-entropy")
     axes[1].plot(epochs, [float(row["train_accuracy"]) for row in rows], label="train")
-    axes[1].plot(epochs, [float(row["val_accuracy"]) for row in rows], label="test")
+    axes[1].plot(epochs, [float(row["val_accuracy"]) for row in rows], label="validation")
     axes[1].set(title="Top-1 accuracy", xlabel="Epoch", ylabel="Percent")
     for axis in axes:
         axis.grid(alpha=0.25)

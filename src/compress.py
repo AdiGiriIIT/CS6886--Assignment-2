@@ -34,7 +34,7 @@ def main() -> None:
     if args.evaluate:
         set_seed(checkpoint["config"]["seed"]); device = resolve_device(args.device)
         model = build_quantized_model(base, args.weight_bits, args.activation_bits).to(device).eval()
-        _, test_loader = build_cifar10_loaders(args.data_dir, args.batch_size, args.num_workers, device.type == "cuda", checkpoint["config"]["seed"])
+        _, _, test_loader = build_cifar10_loaders(args.data_dir, args.batch_size, args.num_workers, device.type == "cuda", checkpoint["config"]["seed"])
         loss, accuracy = run_epoch(model, test_loader, nn.CrossEntropyLoss(), device)
         print(f"PTQ diagnostic test loss: {loss:.4f}; top-1 accuracy: {accuracy:.2f}%")
 

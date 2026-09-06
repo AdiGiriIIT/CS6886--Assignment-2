@@ -7,7 +7,8 @@ import argparse
 import torch
 from torch import nn
 
-from .data import build_cifar10_loaders
+from .compression import build_quantized_model
+from .data import build_cifar10_test_loader
 from .models import build_model
 from .train import run_epoch
 from .utils import resolve_device, set_seed
@@ -22,12 +23,19 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=2)
     args = parser.parse_args()
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    config = checkpoint["config"]
-    set_seed(config["seed"])
+    config = checkpoint.get("config", checkpoint.get("qat_config", {}))
+    set_seed(config.get("seed", 6886))
     device = resolve_device(args.device)
-    _, test_loader = build_cifar10_loaders(args.data_dir, args.batch_size, args.num_workers,
-                                           device.type == "cuda", config["seed"])
-    model = build_model(checkpoint["model_config"], load_pretrained=False).to(device)
+    test_loader = build_cifar10_test_loader(args.data_dir, args.batch_size, args.num_workers,
+                                            device.type == "cuda")
+    if "qat_config" in checkpoint:
+        quantization = checkpoint.get("quantization_state", checkpoint["qat_config"])
+        model = build_quantized_model(
+            build_model(checkpoint["model_config"], load_pretrained=False),
+            quantization["weight_bits"], quantization["activation_bits"], quantization.get("edge_bits"),
+        ).to(device)
+    else:
+        model = build_model(checkpoint["model_config"], load_pretrained=False).to(device)
     model.load_state_dict(checkpoint["state_dict"])
     loss, accuracy = run_epoch(model, test_loader, nn.CrossEntropyLoss(), device)
     print(f"Checkpoint: {args.checkpoint}\nTest loss: {loss:.4f}\nTest top-1 accuracy: {accuracy:.2f}%")

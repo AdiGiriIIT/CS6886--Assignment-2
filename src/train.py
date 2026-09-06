@@ -67,9 +67,9 @@ def main() -> None:
         config["output"]["run_name"] = args.run_name
     set_seed(config["seed"])
     device = resolve_device(config["device"])
-    train_loader, val_loader = build_cifar10_loaders(
+    train_loader, val_loader, _ = build_cifar10_loaders(
         config["data_dir"], config["training"]["batch_size"], config["num_workers"],
-        config["pin_memory"] and device.type == "cuda", config["seed"],
+        config["pin_memory"] and device.type == "cuda", config["seed"], config["training"].get("validation_size", 5_000),
     )
     model = build_model(config["model"]).to(device)
     train_cfg = config["training"]
@@ -101,18 +101,19 @@ def main() -> None:
                "val_loss": f"{val_loss:.6f}", "val_accuracy": f"{val_accuracy:.3f}",
                "learning_rate": f"{optimizer.param_groups[0]['lr']:.8f}"}
         append_csv(history_path, row)
-        print(f"Epoch {epoch:03d}/{train_cfg['epochs']} | train {train_accuracy:.2f}% | test {val_accuracy:.2f}% | {perf_counter() - start:.1f}s")
+        print(f"Epoch {epoch:03d}/{train_cfg['epochs']} | train {train_accuracy:.2f}% | validation {val_accuracy:.2f}% | {perf_counter() - start:.1f}s")
         if val_accuracy > best_accuracy:
             best_accuracy = val_accuracy
             ensure_parent(checkpoint_path)
             torch.save({"state_dict": model.state_dict(), "model_config": config["model"],
                         "normalization": {"mean": CIFAR10_MEAN, "std": CIFAR10_STD}, "config": config,
-                        "epoch": epoch, "test_accuracy": val_accuracy}, checkpoint_path)
+                        "epoch": epoch, "validation_accuracy": val_accuracy,
+                        "validation_size": train_cfg.get("validation_size", 5_000)}, checkpoint_path)
     plot_path = Path(output["curve_dir"]) / f"{run_name}.png"
     save_history_plot(history_path, plot_path)
-    append_csv(output["metrics_file"], {"run_name": run_name, "best_test_accuracy": f"{best_accuracy:.3f}",
+    append_csv(output["metrics_file"], {"run_name": run_name, "best_validation_accuracy": f"{best_accuracy:.3f}",
                                          "checkpoint": str(checkpoint_path), "epochs": train_cfg["epochs"], "seed": config["seed"]})
-    print(f"Best test accuracy: {best_accuracy:.2f}%\nCheckpoint: {checkpoint_path}\nCurves: {plot_path}")
+    print(f"Best validation accuracy: {best_accuracy:.2f}%\nCheckpoint: {checkpoint_path}\nCurves: {plot_path}")
 
 
 if __name__ == "__main__":

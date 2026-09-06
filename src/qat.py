@@ -11,7 +11,7 @@ from .data import CIFAR10_MEAN, CIFAR10_STD, build_cifar10_loaders
 from .models import build_model
 from .quantization import set_quantizer_bits
 from .train import run_epoch
-from .utils import append_csv, resolve_device, set_seed
+from .utils import append_csv, resolve_device, save_history_plot, set_seed
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -65,7 +65,8 @@ def main() -> None:
     source = torch.load(checkpoint_path, map_location="cpu", weights_only=False); set_seed(args.seed); device = resolve_device(args.device)
     base = build_model(source["model_config"], load_pretrained=False); base.load_state_dict(source["state_dict"])
     model = build_quantized_model(base, args.weight_bits, args.activation_bits, args.edge_bits).to(device)
-    train_loader, val_loader = build_cifar10_loaders(args.data_dir, args.batch_size, args.num_workers, device.type == "cuda", args.seed)
+    validation_size = source.get("validation_size", source.get("config", {}).get("training", {}).get("validation_size", 5_000))
+    train_loader, val_loader, _ = build_cifar10_loaders(args.data_dir, args.batch_size, args.num_workers, device.type == "cuda", args.seed, validation_size)
     scales, weights = [], []
     for name, parameter in model.named_parameters(): (scales if name.endswith(".scale") else weights).append(parameter)
     optimizer = torch.optim.SGD([{"params": weights, "lr": args.learning_rate, "weight_decay": 4e-5}, {"params": scales, "lr": args.learning_rate, "weight_decay": 0.0}], momentum=0.9, nesterov=True)
@@ -78,15 +79,17 @@ def main() -> None:
         if args.freeze_bn_epoch and epoch >= args.freeze_bn_epoch: freeze_batch_norm(model)
         started = perf_counter(); train_loss, train_acc = run_epoch(model, train_loader, criterion, device, optimizer, args.max_train_batches, keep_batch_norm_eval=bool(args.freeze_bn_epoch and epoch >= args.freeze_bn_epoch)); val_loss, val_acc = run_epoch(model, val_loader, criterion, device, max_batches=args.max_val_batches); scheduler.step()
         append_csv(history_path, {"epoch": epoch, "weight_bits": current_w, "activation_bits": current_a, "train_loss": f"{train_loss:.6f}", "train_accuracy": f"{train_acc:.3f}", "val_loss": f"{val_loss:.6f}", "val_accuracy": f"{val_acc:.3f}", "learning_rate": f"{optimizer.param_groups[0]['lr']:.8f}"})
-        state = {"state_dict": model.state_dict(), "model_config": source["model_config"], "normalization": {"mean": CIFAR10_MEAN, "std": CIFAR10_STD}, "qat_config": resolved, "epoch": epoch, "test_accuracy": val_acc, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "best_test_accuracy": max(best_accuracy, val_acc)}
+        state = {"state_dict": model.state_dict(), "model_config": source["model_config"], "normalization": {"mean": CIFAR10_MEAN, "std": CIFAR10_STD}, "qat_config": resolved, "quantization_state": {"weight_bits": current_w, "activation_bits": current_a, "edge_bits": args.edge_bits}, "epoch": epoch, "validation_accuracy": val_acc, "validation_size": validation_size, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "best_validation_accuracy": max(best_accuracy, val_acc)}
         torch.save(state, latest_checkpoint)
         if val_acc > best_accuracy: best_accuracy = val_acc; shutil.copy2(latest_checkpoint, best_checkpoint)
-        print(f"epoch={epoch:02d}/{args.epochs} W{current_w}A{current_a} train={train_acc:.2f}% test={val_acc:.2f}% loss={val_loss:.4f} elapsed={perf_counter() - started:.1f}s")
+        print(f"epoch={epoch:02d}/{args.epochs} W{current_w}A{current_a} train={train_acc:.2f}% validation={val_acc:.2f}% loss={val_loss:.4f} elapsed={perf_counter() - started:.1f}s")
     size = weight_size_breakdown(base, args.weight_bits)
-    metrics = {"run_name": run_name, "baseline_sha256": resolved["baseline_sha256"], "weight_bits": args.weight_bits, "activation_bits": args.activation_bits, "edge_bits": args.edge_bits, "epochs": args.epochs, "best_test_accuracy": best_accuracy, "packed_weight_bytes": size.packed_weight_bytes, "weight_scale_bytes": size.weight_scale_bytes, "bias_bytes": size.bias_bytes, "descriptor_bytes": size.descriptor_bytes, "compressed_weight_bytes": size.compressed_bytes, "fp32_weight_bytes": size.fp32_weight_bytes, "weight_compression_ratio": size.ratio, "best_checkpoint": str(best_checkpoint), "latest_checkpoint": str(latest_checkpoint)}
+    plot_path = run_dir / "history.png"
+    save_history_plot(history_path, plot_path)
+    metrics = {"run_name": run_name, "baseline_sha256": resolved["baseline_sha256"], "weight_bits": args.weight_bits, "activation_bits": args.activation_bits, "edge_bits": args.edge_bits, "epochs": args.epochs, "validation_size": validation_size, "best_validation_accuracy": best_accuracy, "packed_weight_bytes": size.packed_weight_bytes, "weight_scale_bytes": size.weight_scale_bytes, "bias_bytes": size.bias_bytes, "descriptor_bytes": size.descriptor_bytes, "compressed_weight_bytes": size.compressed_bytes, "fp32_weight_bytes": size.fp32_weight_bytes, "weight_compression_ratio": size.ratio, "best_checkpoint": str(best_checkpoint), "latest_checkpoint": str(latest_checkpoint), "history_plot": str(plot_path)}
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
     artifacts = [{"logical_name": label, "location": str(path), "sha256": sha256(path), "bytes": path.stat().st_size} for label, path in (("best_qat_checkpoint", best_checkpoint), ("latest_qat_checkpoint", latest_checkpoint))]
     (run_dir / "artifacts.json").write_text(json.dumps(artifacts, indent=2) + "\n", encoding="utf-8")
-    print(f"best_test_accuracy={best_accuracy:.2f}% weight_ratio={size.ratio:.3f}x weight_bytes={size.compressed_bytes} run_record={run_dir}")
+    print(f"best_validation_accuracy={best_accuracy:.2f}% weight_ratio={size.ratio:.3f}x weight_bytes={size.compressed_bytes} run_record={run_dir}")
 
 if __name__ == "__main__": main()

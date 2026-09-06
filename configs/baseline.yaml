@@ -14,6 +14,8 @@ model:
 training:
   epochs: 20
   batch_size: 128
+  # Deterministic hold-out from the 50,000-example official training split.
+  validation_size: 5000
   learning_rate: 0.01
   momentum: 0.9
   weight_decay: 0.00004
