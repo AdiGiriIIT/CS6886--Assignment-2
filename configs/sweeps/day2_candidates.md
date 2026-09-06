@@ -13,6 +13,8 @@ python -m src.qat --checkpoint results/checkpoints/baseline.pt --data-dir "$DATA
 
 The 4-bit runs use one epoch at W8A8 and one at W6A6 before W4A4/W4A6; W6A6
 uses one W8A8 transition epoch. BatchNorm running statistics are frozen at
-epoch 10. Each run writes console output to `results/logs/<run>.log` when run
-from the Day 2 notebook and writes its immutable record to
-`experiments/sweeps/<run>/`.
+epoch 10. The selected checkpoint is
+`results/checkpoints/qat-<run>-best-target.pt`: only epochs that have reached
+the requested W/A precision are eligible. Each run writes console output to
+`results/logs/<run>.log` when run from the Day 2 notebook and writes its
+immutable record to `experiments/sweeps/<run>/`.

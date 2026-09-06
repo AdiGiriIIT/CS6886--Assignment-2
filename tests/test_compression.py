@@ -2,7 +2,7 @@ import math
 import unittest
 import torch
 from torch import nn
-from src.compression import fold_conv_bn, pack_signed, unpack_signed, weight_size_breakdown
+from src.compression import QuantizedInvertedResidual, fold_conv_bn, pack_signed, unpack_signed, weight_size_breakdown
 from src.qat import precision_for_epoch
 from src.quantization import QuantizedResidualAdd, fake_quantize, integer_range, lsq_scale_init
 
@@ -34,5 +34,16 @@ class CompressionTests(unittest.TestCase):
         self.assertEqual(precision_for_epoch(1, 4, 4, 1), (8, 8))
         self.assertEqual(precision_for_epoch(2, 4, 4, 1), (6, 6))
         self.assertEqual(precision_for_epoch(3, 4, 4, 1), (4, 4))
+
+    def test_non_residual_projection_has_signed_output_quantizer(self):
+        block = nn.Module()
+        block.conv = nn.Identity()
+        block.use_res_connect = False
+        quantized = QuantizedInvertedResidual(block, 4)
+        self.assertIsNone(quantized.residual_add)
+        self.assertIsNotNone(quantized.output_quantizer)
+        self.assertTrue(quantized.output_quantizer.signed)
+        self.assertEqual(quantized.output_quantizer.bits, 4)
+        self.assertFalse(torch.equal(quantized(torch.tensor([1.0])), torch.tensor([1.0])))
 
 if __name__ == "__main__": unittest.main()

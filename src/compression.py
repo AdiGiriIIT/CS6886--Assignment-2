@@ -12,16 +12,24 @@ from .quantization import (ActivationFakeQuantizer, QuantizedConv2d,
 
 
 class QuantizedInvertedResidual(nn.Module):
-    """Torchvision MobileNetV2 residual block with an explicit quantized add."""
+    """MobileNetV2 block with quantized signed projection boundaries.
+
+    A residual block obtains this boundary quantization from ``residual_add``:
+    both operands and the result are quantized using its shared signed scale.
+    A non-residual block has no add, so its Conv--BN projection output needs an
+    explicit signed quantizer before it becomes the next block's input.
+    """
     def __init__(self, module: nn.Module, activation_bits: int):
         super().__init__()
         self.conv = module.conv
         self.use_res_connect = module.use_res_connect
         self.residual_add = QuantizedResidualAdd(activation_bits) if self.use_res_connect else None
+        self.output_quantizer = (None if self.use_res_connect
+                                 else ActivationFakeQuantizer(activation_bits, signed=True))
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         branch = self.conv(value)
-        return self.residual_add(value, branch) if self.use_res_connect else branch
+        return self.residual_add(value, branch) if self.use_res_connect else self.output_quantizer(branch)
 
 
 class QuantizedMobileNet(nn.Module):
