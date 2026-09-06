@@ -6,7 +6,7 @@ from pathlib import Path
 from time import perf_counter
 import torch
 from torch import nn
-from .compression import build_quantized_model, weight_size_breakdown
+from .compression import activation_liveness, build_quantized_model, export_packed_model
 from .data import CIFAR10_MEAN, CIFAR10_STD, build_cifar10_loaders
 from .models import build_model
 from .quantization import (activation_quantizer_diagnostics,
@@ -101,13 +101,19 @@ def main() -> None:
         print(f"epoch={epoch:02d}/{args.epochs} W{current_w}A{current_a} train={train_acc:.2f}% validation={val_acc:.2f}% loss={val_loss:.4f} elapsed={perf_counter() - started:.1f}s")
     if best_target_accuracy < 0:
         raise RuntimeError("The requested target precision was never reached; increase --epochs or shorten --transition-epochs.")
-    size = weight_size_breakdown(base, args.weight_bits)
+    # A resume checkpoint is intentionally not a deployment artifact.  Reload
+    # the selected target-precision state and emit the folded, byte-exact QPK.
+    selected = torch.load(best_target_checkpoint, map_location="cpu", weights_only=False)
+    model.load_state_dict(selected["state_dict"]); model.eval()
+    packed_path = run_dir / "deployable_model.qpk"
+    size = export_packed_model(model, packed_path)
+    activation = activation_liveness(model, torch.zeros((1, 3, 32, 32), device=device))
     plot_path = run_dir / "history.png"
     save_history_plot(history_path, plot_path)
-    metrics = {"run_name": run_name, "baseline_sha256": resolved["baseline_sha256"], "weight_bits": args.weight_bits, "activation_bits": args.activation_bits, "edge_bits": args.edge_bits, "epochs": args.epochs, "validation_size": validation_size, "best_target_validation_accuracy": best_target_accuracy, "packed_weight_bytes": size.packed_weight_bytes, "weight_scale_bytes": size.weight_scale_bytes, "bias_bytes": size.bias_bytes, "descriptor_bytes": size.descriptor_bytes, "compressed_weight_bytes": size.compressed_bytes, "fp32_weight_bytes": size.fp32_weight_bytes, "weight_compression_ratio": size.ratio, "best_target_checkpoint": str(best_target_checkpoint), "latest_checkpoint": str(latest_checkpoint), "history_plot": str(plot_path), "activation_diagnostics": str(diagnostics_path)}
+    metrics = {"run_name": run_name, "baseline_sha256": resolved["baseline_sha256"], "weight_bits": args.weight_bits, "activation_bits": args.activation_bits, "edge_bits": args.edge_bits, "epochs": args.epochs, "validation_size": validation_size, "best_target_validation_accuracy": best_target_accuracy, **size.__dict__, "weight_compression_ratio": size.ratio, **activation.__dict__, "activation_compression_ratio": activation.ratio, "runtime_note": "No fake-QAT latency result: PyTorch conv2d remains floating point; benchmark an integer packed backend directly.", "best_target_checkpoint": str(best_target_checkpoint), "latest_checkpoint": str(latest_checkpoint), "deployable_artifact": str(packed_path), "history_plot": str(plot_path), "activation_diagnostics": str(diagnostics_path)}
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
-    artifacts = [{"logical_name": label, "location": str(path), "sha256": sha256(path), "bytes": path.stat().st_size} for label, path in (("best_target_qat_checkpoint", best_target_checkpoint), ("latest_qat_checkpoint", latest_checkpoint))]
+    artifacts = [{"logical_name": label, "location": str(path), "sha256": sha256(path), "bytes": path.stat().st_size} for label, path in (("best_target_qat_checkpoint", best_target_checkpoint), ("latest_qat_checkpoint", latest_checkpoint), ("packed_integer_deployment_artifact", packed_path))]
     (run_dir / "artifacts.json").write_text(json.dumps(artifacts, indent=2) + "\n", encoding="utf-8")
-    print(f"best_target_validation_accuracy={best_target_accuracy:.2f}% weight_ratio={size.ratio:.3f}x weight_bytes={size.compressed_bytes} run_record={run_dir}")
+    print(f"best_target_validation_accuracy={best_target_accuracy:.2f}% weight_ratio={size.ratio:.3f}x packed_bytes={size.total_bytes} activation_ratio={activation.ratio:.3f}x run_record={run_dir}")
 
 if __name__ == "__main__": main()

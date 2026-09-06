@@ -2,7 +2,9 @@ import math
 import unittest
 import torch
 from torch import nn
-from src.compression import QuantizedInvertedResidual, fold_conv_bn, pack_signed, unpack_signed, weight_size_breakdown
+from src.compression import (QuantizedInvertedResidual, activation_liveness, build_quantized_model,
+                             export_packed_model, fold_batch_norms, fold_conv_bn, pack_signed,
+                             unpack_signed, weight_size_breakdown)
 from src.qat import precision_for_epoch
 from src.quantization import (ActivationFakeQuantizer, QuantizedResidualAdd,
                               fake_quantize, integer_range, lsq_scale_init,
@@ -27,6 +29,22 @@ class CompressionTests(unittest.TestCase):
         torch.manual_seed(1); conv, bn = nn.Conv2d(3, 4, 3, bias=False), nn.BatchNorm2d(4)
         conv.eval(); bn.eval(); x = torch.randn(2, 3, 8, 8); self.assertTrue(torch.allclose(bn(conv(x)), fold_conv_bn(conv, bn)(x), atol=1e-5))
         size = weight_size_breakdown(conv, 4); self.assertEqual(size.packed_weight_bytes, math.ceil(conv.weight.numel() / 2)); self.assertGreater(size.compressed_bytes, size.packed_weight_bytes)
+
+    def test_packed_artifact_matches_accounting_and_folds_bn(self):
+        torch.manual_seed(2)
+        base = nn.Sequential(nn.Conv2d(3, 4, 3, bias=False), nn.BatchNorm2d(4), nn.ReLU6(), nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(4, 2)).eval()
+        quant = build_quantized_model(base, 3, 4).eval()
+        x = torch.randn(1, 3, 8, 8); quant(x)  # initialize any lazy activation scales
+        folded = fold_batch_norms(quant)
+        self.assertFalse(any(isinstance(m, nn.BatchNorm2d) for m in folded.modules()))
+        with __import__("tempfile").TemporaryDirectory() as directory:
+            path = __import__("pathlib").Path(directory) / "model.qpk"
+            size = export_packed_model(quant, path)
+            self.assertEqual(path.stat().st_size, size.total_bytes)
+            self.assertEqual(size.packed_weight_bytes, sum(math.ceil(m.weight.numel() * 3 / 8) for m in quant.modules() if hasattr(m, "weight_quantizer")))
+        memory = activation_liveness(quant, x)
+        self.assertGreater(memory.fp32_peak_live_bytes, memory.quantized_peak_live_bytes)
+        self.assertGreater(memory.event_count, 0)
 
     def test_residual_add_uses_one_signed_scale_and_transition(self):
         add = QuantizedResidualAdd(4)

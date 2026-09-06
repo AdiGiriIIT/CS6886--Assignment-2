@@ -68,6 +68,21 @@ It is still fake quantization: reported storage is an accounting estimate, not
 a latency claim. Do not compare a training checkpoint file size to the packed
 weight size.
 
+After selecting a QAT checkpoint, make the actual deployable artifact and its
+byte-verified accounting report (including batch-one peak-live activations):
+
+```bash
+python -m src.export_deploy --checkpoint results/checkpoints/qat-w4a4-seed6886-best-target.pt \
+  --output results/deploy/w4a4.qpk --report results/deploy/w4a4_accounting.json
+```
+
+The exporter folds Conv--BN in both comparison representations, packs each
+weight tensor at its realized bit width, and writes codes, scales, int32 biases,
+descriptors, padding, and requantization fields. It intentionally reports no
+PyTorch fake-QAT latency result: that path still dispatches floating-point
+kernels. Integer-runtime speed needs a packed integer backend and a direct
+benchmark there.
+
 `results/tables/baseline_manifest.json` records the required SHA-256 of the
 immutable checkpoint. Verify it before any sweep with `sha256sum
 results/checkpoints/baseline.pt`.
