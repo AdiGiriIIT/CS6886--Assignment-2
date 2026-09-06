@@ -48,10 +48,31 @@ class ActivationFakeQuantizer(nn.Module):
         initial = initial_scale if initial_scale is not None else (6.0 / qp if not signed else 1.0)
         self.scale = nn.Parameter(torch.tensor(float(initial)))
         self.register_buffer("initialized", torch.tensor(initial_scale is not None))
+        # Non-persistent observer state is deliberately excluded from QAT
+        # checkpoints. It is reset and summarized once per train/validation pass.
+        self._observed_values: torch.Tensor | None = None
+        self._saturated_values: torch.Tensor | None = None
+
+    def reset_observer(self) -> None:
+        self._observed_values = self._saturated_values = None
+
+    def observe(self, value: torch.Tensor) -> None:
+        """Accumulate clipping statistics without retaining model activations."""
+        qn, qp = integer_range(self.bits, self.signed)
+        with torch.no_grad():
+            codes = value.detach() / self.scale.detach().clamp_min(1e-8)
+            saturated = ((codes < qn) | (codes > qp)).sum(dtype=torch.int64)
+            if self._observed_values is None:
+                self._observed_values = torch.zeros((), device=value.device, dtype=torch.int64)
+                self._saturated_values = torch.zeros((), device=value.device, dtype=torch.int64)
+            self._observed_values.add_(value.numel())
+            self._saturated_values.add_(saturated)
+
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         if not bool(self.initialized):
             with torch.no_grad():
                 self.scale.copy_(lsq_scale_init(value, self.bits, self.signed)); self.initialized.fill_(True)
+        self.observe(value)
         return fake_quantize(value, self.scale, self.bits, self.signed)
 
 class QuantizedConv2d(nn.Module):
@@ -92,11 +113,58 @@ class QuantizedResidualAdd(nn.Module):
         return quantizer(quantizer(skip) + quantizer(branch))
 
 
+def _transition_scale_multiplier(old_bits: int, new_bits: int, signed: bool) -> float:
+    """Map a learned step size to the statistically equivalent new precision.
+
+    Signed scales use the LSQ initialization relation ``s ∝ 1/sqrt(Qp)``.
+    ReLU6's unsigned scale represents a learned clipping bound ``Qp * s``;
+    preserving that bound is the corresponding PACT-style transition policy.
+    """
+    _, old_qp = integer_range(old_bits, signed)
+    _, new_qp = integer_range(new_bits, signed)
+    return math.sqrt(old_qp / new_qp) if signed else old_qp / new_qp
+
+
 def set_quantizer_bits(module: nn.Module, weight_bits: int, activation_bits: int) -> None:
-    """Apply a precision-transition step without replacing learned scales."""
+    """Transition precision while rescaling learned steps for the new range.
+
+    Leaving an 8-bit signed scale unchanged at 4 bits shrinks its clipping
+    bound from ``127*s`` to ``7*s``.  This function instead maps scales using
+    the documented LSQ/PACT policy above. Uninitialized activation quantizers
+    are left alone so their first observed tensor initializes at active bits.
+    """
     for child in module.modules():
         if isinstance(child, WeightFakeQuantizer):
+            if child.bits != weight_bits:
+                with torch.no_grad():
+                    child.scale.mul_(_transition_scale_multiplier(child.bits, weight_bits, signed=True))
             child.bits = weight_bits
         elif isinstance(child, ActivationFakeQuantizer):
             if not getattr(child, "fixed_bits", False):
+                if child.bits != activation_bits and bool(child.initialized):
+                    with torch.no_grad():
+                        child.scale.mul_(_transition_scale_multiplier(child.bits, activation_bits, child.signed))
                 child.bits = activation_bits
+
+
+def reset_activation_observers(module: nn.Module) -> None:
+    for child in module.modules():
+        if isinstance(child, ActivationFakeQuantizer):
+            child.reset_observer()
+
+
+def activation_quantizer_diagnostics(module: nn.Module) -> list[dict[str, object]]:
+    """Return scale and clipping data accumulated since the last observer reset."""
+    rows = []
+    for name, child in module.named_modules():
+        if not isinstance(child, ActivationFakeQuantizer):
+            continue
+        qn, qp = integer_range(child.bits, child.signed)
+        scale = float(child.scale.detach().clamp_min(1e-8).cpu())
+        observed = 0 if child._observed_values is None else int(child._observed_values.cpu())
+        saturated = 0 if child._saturated_values is None else int(child._saturated_values.cpu())
+        rows.append({"quantizer": name, "bits": child.bits, "signed": child.signed,
+                     "scale": scale, "clip_min": qn * scale, "clip_max": qp * scale,
+                     "observed_values": observed, "saturated_values": saturated,
+                     "saturation_percent": 0.0 if not observed else 100.0 * saturated / observed})
+    return rows

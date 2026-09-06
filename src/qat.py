@@ -9,7 +9,8 @@ from torch import nn
 from .compression import build_quantized_model, weight_size_breakdown
 from .data import CIFAR10_MEAN, CIFAR10_STD, build_cifar10_loaders
 from .models import build_model
-from .quantization import set_quantizer_bits
+from .quantization import (activation_quantizer_diagnostics,
+                           reset_activation_observers, set_quantizer_bits)
 from .train import run_epoch
 from .utils import append_csv, resolve_device, save_history_plot, set_seed
 
@@ -71,7 +72,7 @@ def main() -> None:
     for name, parameter in model.named_parameters(): (scales if name.endswith(".scale") else weights).append(parameter)
     optimizer = torch.optim.SGD([{"params": weights, "lr": args.learning_rate, "weight_decay": 4e-5}, {"params": scales, "lr": args.learning_rate, "weight_decay": 0.0}], momentum=0.9, nesterov=True)
     scheduler, criterion = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs), nn.CrossEntropyLoss()
-    history_path, best_target_accuracy = run_dir / "history.csv", -1.0
+    history_path, diagnostics_path, best_target_accuracy = run_dir / "history.csv", run_dir / "activation_quantization_diagnostics.csv", -1.0
     # Warm-up precision is useful for optimization but must never be eligible
     # for selection as a checkpoint advertised at the requested target bits.
     best_target_checkpoint = Path(args.checkpoint_dir) / f"qat-{run_name}-best-target.pt"
@@ -80,7 +81,16 @@ def main() -> None:
     for epoch in range(1, args.epochs + 1):
         current_w, current_a = precision_for_epoch(epoch, args.weight_bits, args.activation_bits, args.transition_epochs); set_quantizer_bits(model, current_w, current_a)
         if args.freeze_bn_epoch and epoch >= args.freeze_bn_epoch: freeze_batch_norm(model)
-        started = perf_counter(); train_loss, train_acc = run_epoch(model, train_loader, criterion, device, optimizer, args.max_train_batches, keep_batch_norm_eval=bool(args.freeze_bn_epoch and epoch >= args.freeze_bn_epoch)); val_loss, val_acc = run_epoch(model, val_loader, criterion, device, max_batches=args.max_val_batches); scheduler.step()
+        started = perf_counter()
+        reset_activation_observers(model)
+        train_loss, train_acc = run_epoch(model, train_loader, criterion, device, optimizer, args.max_train_batches, keep_batch_norm_eval=bool(args.freeze_bn_epoch and epoch >= args.freeze_bn_epoch))
+        for row in activation_quantizer_diagnostics(model):
+            append_csv(diagnostics_path, {"epoch": epoch, "phase": "train", **row})
+        reset_activation_observers(model)
+        val_loss, val_acc = run_epoch(model, val_loader, criterion, device, max_batches=args.max_val_batches)
+        for row in activation_quantizer_diagnostics(model):
+            append_csv(diagnostics_path, {"epoch": epoch, "phase": "validation", **row})
+        scheduler.step()
         append_csv(history_path, {"epoch": epoch, "weight_bits": current_w, "activation_bits": current_a, "train_loss": f"{train_loss:.6f}", "train_accuracy": f"{train_acc:.3f}", "val_loss": f"{val_loss:.6f}", "val_accuracy": f"{val_acc:.3f}", "learning_rate": f"{optimizer.param_groups[0]['lr']:.8f}"})
         at_target_precision = current_w == args.weight_bits and current_a == args.activation_bits
         state = {"state_dict": model.state_dict(), "model_config": source["model_config"], "normalization": {"mean": CIFAR10_MEAN, "std": CIFAR10_STD}, "qat_config": resolved, "quantization_state": {"weight_bits": current_w, "activation_bits": current_a, "edge_bits": args.edge_bits}, "epoch": epoch, "validation_accuracy": val_acc, "validation_size": validation_size, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "best_target_validation_accuracy": max(best_target_accuracy, val_acc) if at_target_precision else best_target_accuracy}
@@ -94,7 +104,7 @@ def main() -> None:
     size = weight_size_breakdown(base, args.weight_bits)
     plot_path = run_dir / "history.png"
     save_history_plot(history_path, plot_path)
-    metrics = {"run_name": run_name, "baseline_sha256": resolved["baseline_sha256"], "weight_bits": args.weight_bits, "activation_bits": args.activation_bits, "edge_bits": args.edge_bits, "epochs": args.epochs, "validation_size": validation_size, "best_target_validation_accuracy": best_target_accuracy, "packed_weight_bytes": size.packed_weight_bytes, "weight_scale_bytes": size.weight_scale_bytes, "bias_bytes": size.bias_bytes, "descriptor_bytes": size.descriptor_bytes, "compressed_weight_bytes": size.compressed_bytes, "fp32_weight_bytes": size.fp32_weight_bytes, "weight_compression_ratio": size.ratio, "best_target_checkpoint": str(best_target_checkpoint), "latest_checkpoint": str(latest_checkpoint), "history_plot": str(plot_path)}
+    metrics = {"run_name": run_name, "baseline_sha256": resolved["baseline_sha256"], "weight_bits": args.weight_bits, "activation_bits": args.activation_bits, "edge_bits": args.edge_bits, "epochs": args.epochs, "validation_size": validation_size, "best_target_validation_accuracy": best_target_accuracy, "packed_weight_bytes": size.packed_weight_bytes, "weight_scale_bytes": size.weight_scale_bytes, "bias_bytes": size.bias_bytes, "descriptor_bytes": size.descriptor_bytes, "compressed_weight_bytes": size.compressed_bytes, "fp32_weight_bytes": size.fp32_weight_bytes, "weight_compression_ratio": size.ratio, "best_target_checkpoint": str(best_target_checkpoint), "latest_checkpoint": str(latest_checkpoint), "history_plot": str(plot_path), "activation_diagnostics": str(diagnostics_path)}
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
     artifacts = [{"logical_name": label, "location": str(path), "sha256": sha256(path), "bytes": path.stat().st_size} for label, path in (("best_target_qat_checkpoint", best_target_checkpoint), ("latest_qat_checkpoint", latest_checkpoint))]
     (run_dir / "artifacts.json").write_text(json.dumps(artifacts, indent=2) + "\n", encoding="utf-8")

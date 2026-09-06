@@ -250,6 +250,15 @@ move to 6 bits briefly, and then train at the target precision. The final
 checkpoint must spend most of its training at its claimed target precision.
 Record the schedule as part of the resolved configuration.
 
+Changing a bit width must also change the associated learned step size; merely
+changing `Qp` can turn a previously safe activation range into severe clipping.
+For signed LSQ quantizers, map `s_old` to
+`s_new = s_old * sqrt(Qp_old / Qp_new)`, which is the corresponding LSQ
+initialization scale under unchanged tensor statistics. For unsigned ReLU6
+quantizers, map `s_new = s_old * Qp_old / Qp_new` so the learned clipping bound
+`Qp * s` is preserved. Log each activation boundary's scale, clipping interval,
+and saturation fraction for train and validation at every epoch.
+
 If W4A4 training is unstable, debug in this order:
 
 1. confirm activation signedness and residual scale handling;

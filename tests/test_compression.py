@@ -4,7 +4,9 @@ import torch
 from torch import nn
 from src.compression import QuantizedInvertedResidual, fold_conv_bn, pack_signed, unpack_signed, weight_size_breakdown
 from src.qat import precision_for_epoch
-from src.quantization import QuantizedResidualAdd, fake_quantize, integer_range, lsq_scale_init
+from src.quantization import (ActivationFakeQuantizer, QuantizedResidualAdd,
+                              fake_quantize, integer_range, lsq_scale_init,
+                              set_quantizer_bits)
 
 class CompressionTests(unittest.TestCase):
     def test_ranges_and_levels(self):
@@ -45,5 +47,17 @@ class CompressionTests(unittest.TestCase):
         self.assertTrue(quantized.output_quantizer.signed)
         self.assertEqual(quantized.output_quantizer.bits, 4)
         self.assertFalse(torch.equal(quantized(torch.tensor([1.0])), torch.tensor([1.0])))
+
+    def test_precision_transition_rescales_steps_and_preserves_uninitialized_activation(self):
+        signed = ActivationFakeQuantizer(8, signed=True, initial_scale=1.0)
+        relu6 = ActivationFakeQuantizer(8, signed=False, initial_scale=6 / 255)
+        pending = ActivationFakeQuantizer(8, signed=True)
+        wrapper = nn.Module()
+        wrapper.signed, wrapper.relu6, wrapper.pending = signed, relu6, pending
+        set_quantizer_bits(wrapper, 4, 4)
+        self.assertAlmostEqual(float(signed.scale), math.sqrt(127 / 7), places=6)
+        self.assertAlmostEqual(float(relu6.scale), 6 / 15, places=6)
+        self.assertAlmostEqual(float(pending.scale), 1.0, places=6)
+        self.assertEqual(pending.bits, 4)
 
 if __name__ == "__main__": unittest.main()
