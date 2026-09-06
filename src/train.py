@@ -51,6 +51,7 @@ def parse_args() -> argparse.Namespace:
                         help="Override config device; use cuda to fail fast without a GPU.")
     parser.add_argument("--epochs", type=int, help="Override YAML epoch count.")
     parser.add_argument("--run-name", help="Override output.run_name.")
+    parser.add_argument("--data-dir", help="Override data_dir from the YAML configuration.")
     parser.add_argument("--max-train-batches", type=int, help="Limit batches for a smoke test.")
     parser.add_argument("--max-val-batches", type=int, help="Limit test batches for a smoke test.")
     return parser.parse_args()
@@ -65,6 +66,8 @@ def main() -> None:
         config["training"]["epochs"] = args.epochs
     if args.run_name is not None:
         config["output"]["run_name"] = args.run_name
+    if args.data_dir is not None:
+        config["data_dir"] = args.data_dir
     set_seed(config["seed"])
     device = resolve_device(config["device"])
     train_loader, val_loader, _ = build_cifar10_loaders(
