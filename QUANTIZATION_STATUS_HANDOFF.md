@@ -1,0 +1,122 @@
+# Quantization status and Q3/Q4 handoff
+
+Date: 6 September 2026. All accuracy differences below use the held-out test
+result actually present in this repository: **92.39%**
+(`baseline_results/results/logs/baseline-held-out-test.log`). The 92.69% number
+in `main.tex` and `COMPRESSION_DESIGN.md` is not supported by the supplied
+checkpoint/log and must not be mixed into the final comparison.
+
+## Executive status
+
+The custom QAT implementation is credible for measuring the accuracy of the
+PyTorch fake-quantized graph. It covers all Conv2d/Linear weights with learned
+per-output-channel symmetric scales, quantizes ReLU6 outputs as unsigned, and
+places signed quantizers at input, projection, residual-add, and logit
+boundaries. Runs start from the same baseline SHA-256 and select checkpoints on
+the 5,000-image validation set before one held-out test evaluation.
+
+The `.qpk` files prove that weight codes can be bit-packed and give useful,
+byte-exact **storage estimates**. They are not yet executable integer models.
+Therefore there is no measured inference latency, throughput, or energy
+improvement. The honest current efficiency claims are serialized storage
+reduction and analytical activation storage/traffic reduction.
+
+## Reconciled results
+
+| Policy | Test top-1 | Drop vs 92.39 | QPK size | Weight ratio | Activation traffic ratio |
+|---|---:|---:|---:|---:|---:|
+| W8A8 | 92.22% | 0.17 pp | 2.380 MiB | 3.558x | 4.000x |
+| W6A6 | 91.19% | 1.20 pp | 1.854 MiB | 4.566x | 5.333x |
+| W4A6 | 88.76% | 3.63 pp | 1.329 MiB | 6.370x | 5.333x |
+| W4A4 | 81.98% | 10.41 pp | 1.329 MiB | 6.370x | 7.999x |
+
+The ratio denominator is 8,878,504 bytes of BN-folded FP32 deployable weights.
+The QPK numerator includes packed codes, FP32 per-channel weight scales, FP32
+activation scales, int32 biases, requantization fields, JSON descriptors,
+alignment, and the header. Use MiB (`bytes / 2^20`) consistently; optionally
+give decimal MB in parentheses.
+
+W6A6 is the best current Q4 selection: it retains 98.70% of baseline accuracy
+while reducing weight storage 4.566x and modeled activation traffic 5.333x.
+W4A6 is the aggressive alternative if the grading function values compression
+much more than a 3.63-point loss. W4A4 is dominated for persistent model size by
+W4A6: it saves only 96 QPK bytes while losing another 6.78 accuracy points.
+
+## What “activation compression” means
+
+State this explicitly in the report: batch size one, eval mode, CIFAR-10 input
+shape `1x3x32x32`; count every explicit quantized activation-boundary tensor in
+one forward schedule, bit-pack it at its realized width, and include one FP32
+scale per boundary. “Traffic” is the sum of bytes written at those boundaries.
+Peak-live memory attempts to retain residual operands until addition, but the
+current tracer relies on Python tensor identities and produced inconsistent
+FP32 peaks across runs. Use the traffic ratio in the final table until the
+liveness tracer is replaced and regenerated.
+
+## Correctness gaps before claiming deployment
+
+1. Export folds BN after training but retains pre-fold learned weight scales;
+   exported numerical accuracy has not been evaluated.
+2. Every layer descriptor currently receives the model-input scale for bias
+   quantization, rather than its actual input-boundary scale.
+3. Requantization multiplier/shift pairs are unity placeholders, not the
+   accumulator-to-output scale mapping for each layer.
+4. The QPK has no loader/integer convolution backend, so it cannot substantiate
+   runtime speedup.
+5. Learned scales are clamped in forward but are not positively parameterized;
+   a scale driven negative can lose useful gradient.
+6. Existing tests could not be rerun on this machine because its Python lacks
+   PyTorch. Run `python -m unittest discover -s tests -v` in Kaggle/Colab.
+
+These gaps do not invalidate the recorded fake-QAT test accuracies. They mean
+the final report must call QPK size “packed storage/accounting” rather than a
+validated integer deployment artifact.
+
+## Mixed-precision next step
+
+The logs support keeping activations at A6 initially. At fixed W4, A6 to A4
+costs 6.78 points. Final-epoch W4A4 saturation is highest at the stem (6.785%),
+input (6.208%), and selected early/mid ReLU6 boundaries; this is direct evidence
+that uniform A4 is the wrong next optimization.
+
+The code now supports two reproducible weight exception classes:
+`--first-last-weight-bits` and `--depthwise-weight-bits`. Run the three commands
+in `configs/sweeps/day2_candidates.md`. The main candidate is W4 for pointwise
+weights, W6 for depthwise weights, W8 for stem/classifier weights, and A6. This
+keeps the large 1x1 tensors at 4 bits while protecting structurally sensitive
+layers. Choose using validation accuracy versus actual exported bytes, then
+evaluate the winning policy on test once. If time permits, repeat the winner at
+two additional seeds and report mean/range.
+
+Do not assume mixed precision wins: require it to exceed W4A6 accuracy enough
+to justify its byte overhead, and compare it with the W6A6 knee.
+
+## Q3/Q4 submission checklist
+
+- Q3: include all four uniform points plus mixed candidates, accuracy curves,
+  the consolidated table, and the mandatory W&B Parallel Coordinates chart.
+  Axes should include policy, realized average weight bits, activation bits,
+  exception bytes, validation/test accuracy, QPK MiB, weight ratio, and
+  activation-traffic ratio.
+- Q4: report exactly one selected operating point. At present use W6A6; replace
+  it only if a mixed policy is Pareto-superior. Give its four required values:
+  weight ratio, activation ratio/method, test accuracy, and final size.
+- Add a stacked metadata/payload breakdown. For W6A6: 1,651,920 packed-weight
+  bytes; 68,264 weight-scale bytes; 216 activation-scale bytes; 68,264 int32
+  bias bytes; 136,528 requantization bytes; 19,293 descriptor bytes; 63 padding
+  bytes; 12 header bytes.
+- Do not claim speedup from bit width or BOPs. A normalized BOP count may be
+  presented as a theoretical compute proxy, clearly labeled as such.
+- Resolve the baseline discrepancy and correct `main.tex`: checkpoint selection
+  must be described as validation-based, not test-based.
+- Add Q2--Q5 to `main.tex`; it currently ends after Q1. Add the GitHub URL and
+  exact environment/reproduction commands.
+
+## Artifact integrity notes
+
+The W6 QPK matches its Day-2 exported SHA. The standalone W8 QPK differs from
+the Day-2 W8 export despite equal size, and its peak-live accounting also
+differs; regenerate W8 before using peak memory. Day-2 W4 metrics use an older
+accounting schema, so use the standalone `compressed_artifacts` accounting
+numbers consistently. The two incorrect `artifact` fields in W6/W8 accounting
+JSON were corrected in this handoff.

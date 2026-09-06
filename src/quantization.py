@@ -147,6 +147,50 @@ def set_quantizer_bits(module: nn.Module, weight_bits: int, activation_bits: int
                 child.bits = activation_bits
 
 
+def apply_mixed_weight_policy(module: nn.Module, default_bits: int,
+                              depthwise_bits: int | None = None,
+                              first_last_bits: int | None = None) -> dict[str, int]:
+    """Apply a reproducible mixed-precision policy and return realized bits.
+
+    ``first_last_bits`` covers the stem and the final weighted layer (the
+    classifier), while ``depthwise_bits`` covers depthwise convolutions.  The
+    first/last rule takes precedence if a category ever overlaps.  Calling
+    this after the progressive precision transition makes exceptions active
+    only at the target stage, keeping the 8 -> 6 -> target warm-up intact.
+    """
+    weighted = [(name, child) for name, child in module.named_modules()
+                if isinstance(child, (QuantizedConv2d, QuantizedLinear))]
+    realized: dict[str, int] = {}
+    for index, (name, child) in enumerate(weighted):
+        bits = default_bits
+        if (depthwise_bits is not None and isinstance(child, QuantizedConv2d)
+                and child.groups == child.weight.shape[0]
+                and child.weight.shape[1] == 1):
+            bits = depthwise_bits
+        if first_last_bits is not None and index in (0, len(weighted) - 1):
+            bits = first_last_bits
+        if child.weight_quantizer.bits != bits:
+            with torch.no_grad():
+                child.weight_quantizer.scale.mul_(_transition_scale_multiplier(
+                    child.weight_quantizer.bits, bits, signed=True))
+        child.weight_quantizer.bits = bits
+        realized[name] = bits
+    return realized
+
+
+def apply_weight_bit_map(module: nn.Module, realized: dict[str, int]) -> None:
+    """Restore the exact per-layer bit policy recorded in a checkpoint."""
+    modules = dict(module.named_modules())
+    missing = sorted(set(realized) - set(modules))
+    if missing:
+        raise ValueError(f"checkpoint weight policy contains unknown modules: {missing}")
+    for name, bits in realized.items():
+        child = modules[name]
+        if not isinstance(child, (QuantizedConv2d, QuantizedLinear)):
+            raise ValueError(f"weight policy target is not quantized: {name}")
+        child.weight_quantizer.bits = int(bits)
+
+
 def reset_activation_observers(module: nn.Module) -> None:
     for child in module.modules():
         if isinstance(child, ActivationFakeQuantizer):

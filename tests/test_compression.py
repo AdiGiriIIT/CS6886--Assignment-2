@@ -7,7 +7,7 @@ from src.compression import (QuantizedInvertedResidual, activation_liveness, bui
                              unpack_signed, weight_size_breakdown)
 from src.qat import precision_for_epoch
 from src.quantization import (ActivationFakeQuantizer, QuantizedResidualAdd,
-                              fake_quantize, integer_range, lsq_scale_init,
+                              apply_mixed_weight_policy, fake_quantize, integer_range, lsq_scale_init,
                               set_quantizer_bits)
 
 class CompressionTests(unittest.TestCase):
@@ -77,5 +77,14 @@ class CompressionTests(unittest.TestCase):
         self.assertAlmostEqual(float(relu6.scale), 6 / 15, places=6)
         self.assertAlmostEqual(float(pending.scale), 1.0, places=6)
         self.assertEqual(pending.bits, 4)
+
+    def test_mixed_weight_policy(self):
+        base = nn.Sequential(nn.Conv2d(3, 4, 3), nn.ReLU6(),
+                             nn.Conv2d(4, 4, 3, groups=4), nn.ReLU6(),
+                             nn.Flatten(), nn.Linear(64, 2)).eval()
+        quant = build_quantized_model(base, 4, 6)
+        realized = apply_mixed_weight_policy(quant, 4, depthwise_bits=6,
+                                             first_last_bits=8)
+        self.assertEqual(list(realized.values()), [8, 6, 8])
 
 if __name__ == "__main__": unittest.main()

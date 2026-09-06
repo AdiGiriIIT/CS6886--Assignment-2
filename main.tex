@@ -80,10 +80,10 @@ over 20 epochs. Cross-entropy loss was used without label smoothing.
 
 \subsection{Results}
 
-Table~\ref{tab:baseline-results} reports the main baseline result. The best
-checkpoint was selected by test top-1 accuracy; it occurred at epoch 19. The
-last epoch achieved a nearly identical test accuracy of 92.66\%, showing that
-the result is not due to a single unstable epoch.
+Table~\ref{tab:baseline-results} reports the main baseline result. The checkpoint
+was selected using the fixed 5,000-image validation split; the official test set
+was evaluated only after selection. The supplied checkpoint's held-out test log
+records 92.39\% top-1 accuracy.
 
 \begin{table}[H]
     \centering
@@ -94,18 +94,18 @@ the result is not due to a single unstable epoch.
         Metric & Value \\
         \midrule
         Number of training epochs & 20 \\
-        Best test top-1 accuracy & \textbf{92.69\%} \\
-        Epoch of best checkpoint & 19 \\
-        Final-epoch train accuracy & 97.06\% \\
-        Final-epoch test accuracy & 92.66\% \\
-        Best test loss & 0.2401 \\
+        Held-out test top-1 accuracy & \textbf{92.39\%} \\
+        Best validation accuracy & 92.86\% \\
+        Final-epoch train accuracy & 97.27\% \\
+        Final-epoch validation accuracy & 92.78\% \\
+        Held-out test loss & 0.2501 \\
         \bottomrule
     \end{tabular}
 \end{table}
 
 Figure~\ref{fig:baseline-curves} shows the training and test curves. The
 accuracy rises quickly after the pretrained backbone is unfrozen at epoch 3:
-test accuracy increases from 62.07\% at epoch 2 to 84.59\% at epoch 3. It then
+validation accuracy increases from 63.20\% at epoch 2 to 85.88\% at epoch 3. It then
 improves steadily and plateaus around 92--93\% after approximately 14 epochs.
 
 \begin{figure}[H]
@@ -119,9 +119,9 @@ improves steadily and plateaus around 92--93\% after approximately 14 epochs.
 \subsection{Failure modes and limitations}
 
 The curves indicate mild overfitting late in training: final training accuracy
-is 97.06\% while final test accuracy is 92.66\%, a gap of approximately 4.4
-percentage points. Test loss reaches its minimum at epoch 19 and is essentially
-flat thereafter, whereas training loss continues to decrease. Consequently,
+is 97.27\% while final validation accuracy is 92.78\%, a gap of approximately
+4.5 percentage points. Validation loss is essentially flat late in training,
+whereas training loss continues to decrease. Consequently,
 substantially extending this schedule is unlikely to improve generalization
 without stronger regularization or additional augmentation. A second practical
 failure mode is accidental CPU execution in a hosted notebook environment;

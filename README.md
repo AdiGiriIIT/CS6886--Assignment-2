@@ -83,6 +83,22 @@ PyTorch fake-QAT latency result: that path still dispatches floating-point
 kernels. Integer-runtime speed needs a packed integer backend and a direct
 benchmark there.
 
+Mixed-precision weight follow-ups are supported without framework compression
+APIs. For example, this keeps pointwise weights at W4, depthwise weights at W6,
+stem/classifier weights at W8, and activations at A6:
+
+```bash
+python -m src.qat --checkpoint results/checkpoints/baseline.pt --device cuda \
+  --weight-bits 4 --activation-bits 6 --depthwise-weight-bits 6 \
+  --first-last-weight-bits 8 --epochs 12 \
+  --run-name mp-w4dw6edgew8-a6-seed6886
+```
+
+See [the quantization status handoff](QUANTIZATION_STATUS_HANDOFF.md) for the
+reconciled Q3/Q4 table, current QPK limitations, and recommended experiment
+order. Packed size and activation-byte accounting are supported; an
+integer-kernel latency/energy speedup is not yet measured.
+
 `results/tables/baseline_manifest.json` records the required SHA-256 of the
 immutable checkpoint. Verify it before any sweep with `sha256sum
 results/checkpoints/baseline.pt`.
