@@ -1,8 +1,0 @@
-{
-  "logical_name": "immutable FP32 baseline checkpoint",
-  "path": "results/checkpoints/baseline.pt",
-  "sha256": "02ff38ac832c9fa3d72cad3db375b1103991b64eaf417c796ab352b49fbaae3d",
-  "bytes": 9192651,
-  "recorded_test_top1_percent": 92.69,
-  "policy": "Do not overwrite this checkpoint; every QAT candidate loads it afresh."
-}

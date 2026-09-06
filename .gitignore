@@ -10,5 +10,6 @@ results/curves/*.csv
 results/curves/*.png
 results/metrics.csv
 *artifacts/
+*results/
 
 
