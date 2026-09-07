@@ -25,10 +25,13 @@ reduction and analytical activation storage/traffic reduction.
 
 | Policy | Test top-1 | Drop vs 92.39 | QPK size | Weight ratio | Activation traffic ratio |
 |---|---:|---:|---:|---:|---:|
-| W8A8 | 92.22% | 0.17 pp | 2.380 MiB | 3.558x | 4.000x |
-| W6A6 | 91.19% | 1.20 pp | 1.854 MiB | 4.566x | 5.333x |
-| W4A6 | 88.76% | 3.63 pp | 1.329 MiB | 6.370x | 5.333x |
-| W4A4 | 81.98% | 10.41 pp | 1.329 MiB | 6.370x | 7.999x |
+| W8A8 | 92.22% | 0.17 pp | 2.380 MiB | 3.558x | 3.998x |
+| W6A6 | 91.19% | 1.20 pp | 1.854 MiB | 4.566x | 5.330x |
+| W4A6 | 88.76% | 3.63 pp | 1.329 MiB | 6.370x | 5.330x |
+| W4A4 | 81.98% | 10.41 pp | 1.329 MiB | 6.370x | 7.992x |
+| MP: W4/A6 + W8 stem/classifier | 88.67% | 3.72 pp | 1.336 MiB | 6.338x | 5.330x |
+| MP: W4/A6 + W6 depthwise + W8 stem/classifier | 89.93% | 2.46 pp | 1.351 MiB | 6.267x | 5.330x |
+| MP: previous policy + A8 input/logits | 89.94% | 2.45 pp | 1.351 MiB | 6.267x | 5.320x |
 
 The ratio denominator is 8,878,504 bytes of BN-folded FP32 deployable weights.
 The QPK numerator includes packed codes, FP32 per-channel weight scales, FP32
@@ -36,11 +39,35 @@ activation scales, int32 biases, requantization fields, JSON descriptors,
 alignment, and the header. Use MiB (`bytes / 2^20`) consistently; optionally
 give decimal MB in parentheses.
 
-W6A6 is the best current Q4 selection: it retains 98.70% of baseline accuracy
-while reducing weight storage 4.566x and modeled activation traffic 5.333x.
-W4A6 is the aggressive alternative if the grading function values compression
-much more than a 3.63-point loss. W4A4 is dominated for persistent model size by
-W4A6: it saves only 96 QPK bytes while losing another 6.78 accuracy points.
+The last column is recomputed from the recorded traffic bytes
+(`fp32_traffic_bytes / quantized_traffic_bytes`). The artifact JSON field named
+`activation_compression_ratio` is instead a peak-live ratio, because of an
+implementation naming error; do not use that field as a traffic ratio.
+
+The mixed runs are complete and valid: each used the same baseline SHA-256,
+seed, 12-epoch schedule, and best-validation checkpoint protocol as the fixed
+runs. The best validation-selected mixed point is the A8-input/logit variant
+(91.04% validation, 89.94% test). It recovers **1.18 pp** over W4A6 on test for
+only 22,912 additional QPK bytes (1.64%; 1.351 MiB total), while remaining
+527,760 bytes (27.14%) smaller than W6A6. This is a real, useful new
+accuracy--storage knee, but it does **not** beat W6A6 on accuracy: it remains
+1.25 pp lower on test at nearly the same modeled A6 traffic ratio.
+
+The W8-stem/classifier-only ablation is dominated by W4A6: it is 6,848 bytes
+larger and 0.09 pp less accurate. Raising depthwise weights to W6 is what
+produces the recovery. The additional A8 input/logit exception changes the QPK
+size by zero and adds only 770 modeled traffic bytes; its 0.01 pp test gain
+over the otherwise identical A6-edge policy is far below what one seed can
+establish. It was nevertheless selected by validation (91.04% versus 90.80%)
+at the same QPK size.
+
+W6A6 remains the recommended Q4 point when accuracy is the primary objective:
+it retains 98.70% of baseline accuracy while reducing weight storage 4.566x
+and modeled activation traffic 5.330x. The depthwise mixed policy is the
+recommended aggressive alternative when its 27.14% smaller QPK than W6A6 is
+worth its additional 1.25 pp loss. W4A4 is dominated for persistent
+model size by W4A6: it saves only 96 QPK bytes while losing another 6.78
+accuracy points.
 
 ## What “activation compression” means
 
@@ -72,35 +99,50 @@ These gaps do not invalidate the recorded fake-QAT test accuracies. They mean
 the final report must call QPK size “packed storage/accounting” rather than a
 validated integer deployment artifact.
 
-## Mixed-precision next step
+## Mixed-precision status and next step
 
-The logs support keeping activations at A6 initially. At fixed W4, A6 to A4
-costs 6.78 points. Final-epoch W4A4 saturation is highest at the stem (6.785%),
-input (6.208%), and selected early/mid ReLU6 boundaries; this is direct evidence
-that uniform A4 is the wrong next optimization.
+The logs support keeping activations at A6. At fixed W4, A6 to A4 costs 6.78
+points. The completed ablations show that W8 stem/classifier weights alone do
+not help, whereas W6 depthwise weights recover 1.17--1.18 pp. Thus the
+depthwise exception, not the edge-weight exception, is the actionable result.
 
-The code now supports two reproducible weight exception classes:
-`--first-last-weight-bits` and `--depthwise-weight-bits`. Run the three commands
-in `configs/sweeps/day2_candidates.md`. The main candidate is W4 for pointwise
-weights, W6 for depthwise weights, W8 for stem/classifier weights, and A6. This
-keeps the large 1x1 tensors at 4 bits while protecting structurally sensitive
-layers. Choose using validation accuracy versus actual exported bytes, then
-evaluate the winning policy on test once. If time permits, repeat the winner at
-two additional seeds and report mean/range.
+This is a good time to stop broad precision-policy exploration. The current
+set identifies the relevant Pareto frontier: W4A6 for smallest model, mixed
+W4/W6/W8-A6 for the compact middle point, W6A6 for the accuracy-oriented
+selection, and W8A8 for near-baseline accuracy. More combinations of the same
+global exception classes have low expected value; the A8-edge ablation already
+showed a practically negligible test change.
 
-Do not assume mixed precision wins: require it to exceed W4A6 accuracy enough
-to justify its byte overhead, and compare it with the W6A6 knee.
+If compute time remains, spend it on confirmation or one targeted experiment,
+not another broad sweep:
+
+- Highest-value confirmation: rerun the selected depthwise mixed policy and
+  W6A6 with two additional seeds, select on validation, and report mean/range.
+  The present 1.25 pp W6A6-versus-mixed gap is likely meaningful, but its exact
+  size needs seed variation.
+- Highest-value new ablation: add a configurable stem/early-ReLU activation
+  exception and test A8 only at the boundaries previously diagnosed as A4
+  saturation hotspots. The current `--edge-bits` controls input and logits,
+  not the stem boundary, so it did not test that hypothesis. Do this only if
+  the implementation work is acceptable; no evidence supports broad A8
+  activations.
+
+Do not claim a runtime advantage from any of these policies until the export
+correctness gaps below and an integer backend are validated.
 
 ## Q3/Q4 submission checklist
 
-- Q3: include all four uniform points plus mixed candidates, accuracy curves,
+- Q3: include all four uniform points plus the three completed mixed candidates,
+  accuracy curves,
   the consolidated table, and the mandatory W&B Parallel Coordinates chart.
   Axes should include policy, realized average weight bits, activation bits,
   exception bytes, validation/test accuracy, QPK MiB, weight ratio, and
   activation-traffic ratio.
-- Q4: report exactly one selected operating point. At present use W6A6; replace
-  it only if a mixed policy is Pareto-superior. Give its four required values:
-  weight ratio, activation ratio/method, test accuracy, and final size.
+- Q4: report exactly one selected operating point. Use W6A6 for the
+  accuracy-oriented recommendation; describe the depthwise mixed policy as the
+  compact Pareto alternative, not a replacement. Give the selected point's four
+  required values: weight ratio, activation ratio/method, test accuracy, and
+  final size.
 - Add a stacked metadata/payload breakdown. For W6A6: 1,651,920 packed-weight
   bytes; 68,264 weight-scale bytes; 216 activation-scale bytes; 68,264 int32
   bias bytes; 136,528 requantization bytes; 19,293 descriptor bytes; 63 padding

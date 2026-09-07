@@ -73,6 +73,7 @@ def main() -> None:
     train_loader, val_loader, _ = build_cifar10_loaders(
         config["data_dir"], config["training"]["batch_size"], config["num_workers"],
         config["pin_memory"] and device.type == "cuda", config["seed"], config["training"].get("validation_size", 5_000),
+        config.get("augmentation"),
     )
     model = build_model(config["model"]).to(device)
     train_cfg = config["training"]

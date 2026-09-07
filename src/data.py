@@ -10,25 +10,42 @@ CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR10_STD = (0.2470, 0.2435, 0.2616)
 
 
-def cifar10_transforms() -> tuple[transforms.Compose, transforms.Compose]:
+def cifar10_transforms(augmentation: dict | None = None) -> tuple[transforms.Compose, transforms.Compose]:
+    """Return CIFAR-10 transforms, optionally enabling stronger train-only augmentation.
+
+    ``augmentation`` is deliberately opt-in so an existing QAT command keeps the
+    original crop/flip protocol.  RandAugment operates on PIL images and Random
+    Erasing operates on normalized tensors, hence their positions in the list.
+    """
+    augmentation = augmentation or {}
     normalize = transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
-    train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4), transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(), normalize,
-    ])
+    train_steps: list = [transforms.RandomCrop(32, padding=4), transforms.RandomHorizontalFlip()]
+    if augmentation.get("randaugment", False):
+        train_steps.append(transforms.RandAugment(
+            num_ops=int(augmentation.get("randaugment_num_ops", 2)),
+            magnitude=int(augmentation.get("randaugment_magnitude", 7)),
+        ))
+    train_steps.extend([transforms.ToTensor(), normalize])
+    random_erasing_probability = float(augmentation.get("random_erasing_probability", 0.0))
+    if not 0.0 <= random_erasing_probability <= 1.0:
+        raise ValueError("random_erasing_probability must be in [0, 1]")
+    if random_erasing_probability:
+        train_steps.append(transforms.RandomErasing(p=random_erasing_probability))
+    train = transforms.Compose(train_steps)
     test = transforms.Compose([transforms.ToTensor(), normalize])
     return train, test
 
 
 def build_cifar10_loaders(data_dir: str, batch_size: int, num_workers: int,
-                          pin_memory: bool, seed: int, validation_size: int = 5_000):
+                          pin_memory: bool, seed: int, validation_size: int = 5_000,
+                          augmentation: dict | None = None):
     """Build deterministic 45k/5k train/validation loaders plus the untouched test loader.
 
     The validation indices are sampled once from the official CIFAR-10 training
     split using ``seed``.  A separate dataset instance gives validation examples
     evaluation transforms rather than stochastic training augmentation.
     """
-    train_transform, test_transform = cifar10_transforms()
+    train_transform, test_transform = cifar10_transforms(augmentation)
     train_set = datasets.CIFAR10(data_dir, train=True, download=True, transform=train_transform)
     validation_set = datasets.CIFAR10(data_dir, train=True, download=True, transform=test_transform)
     test_set = datasets.CIFAR10(data_dir, train=False, download=True, transform=test_transform)

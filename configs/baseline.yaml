@@ -12,17 +12,27 @@ model:
   dropout: 0.2
 
 training:
-  epochs: 20
+  # Strong augmentation needs a longer decay schedule than the original 20-epoch run.
+  epochs: 60
   batch_size: 128
   # Deterministic hold-out from the 50,000-example official training split.
   validation_size: 5000
   learning_rate: 0.01
   momentum: 0.9
-  weight_decay: 0.00004
-  label_smoothing: 0.0
+  weight_decay: 0.0001
+  label_smoothing: 0.1
   scheduler: cosine
   # Train the randomly initialized CIFAR-10 head first, then fine-tune all layers.
   freeze_backbone_epochs: 2
+
+# Train-only regularization. RandAugment runs while samples are PIL images;
+# RandomErasing runs after normalization. Validation/test remain deterministic.
+# These values are intentionally moderate for 32x32 CIFAR-10 images.
+augmentation:
+  randaugment: true
+  randaugment_num_ops: 2
+  randaugment_magnitude: 7
+  random_erasing_probability: 0.10
 
 output:
   run_name: baseline

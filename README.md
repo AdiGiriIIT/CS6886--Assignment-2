@@ -107,20 +107,23 @@ results/checkpoints/baseline.pt`.
 
 * **Data:** a seed-6886 permutation makes a fixed 45,000/5,000
   train/validation split from CIFAR-10's official 50,000-example training set.
-  Training uses `RandomCrop(32, padding=4)`, `RandomHorizontalFlip()`,
-  `ToTensor()`, and CIFAR-10 channel normalization (mean `(0.4914, 0.4822,
-  0.4465)`, std `(0.2470, 0.2435, 0.2616)`). Validation and the official test
-  set use only tensor conversion and the same normalization. Checkpoints are
-  selected on validation; invoke `src.evaluate` once the checkpoint is selected
-  to measure held-out test accuracy.
+  The baseline's train transform uses `RandomCrop(32, padding=4)`, horizontal
+  flip, RandAugment (2 operations, magnitude 7), tensor conversion, CIFAR-10
+  channel normalization (mean `(0.4914, 0.4822, 0.4465)`, std `(0.2470,
+  0.2435, 0.2616)`), and Random Erasing (`p=0.10`). Validation and the official
+  test set use only tensor conversion and the same normalization. Checkpoints
+  are selected on validation; invoke `src.evaluate` once the checkpoint is
+  selected to measure held-out test accuracy. The augmentation is configurable
+  and opt-in at the data-loader level, so existing QAT commands retain their
+  documented crop/flip protocol unless explicitly changed.
 * **Model:** torchvision's official MobileNetV2 is initialized with public
   `IMAGENET1K_V2` weights, adapted for 32×32 inputs with a stride-1 stem, and
   given a newly initialized 10-class classifier. The YAML default uses width
   multiplier 1.0 and dropout 0.2.
 * **Training:** the new classifier is warmed up for two epochs with the pretrained
-  backbone frozen, then all layers are fine-tuned using SGD with Nesterov momentum,
-  weight decay, cosine LR scheduling, and an explicit seed. See
-  `configs/baseline.yaml` for all values.
+  backbone frozen, then all layers are fine-tuned for 60 epochs using SGD with
+  Nesterov momentum, `1e-4` weight decay, `0.1` label smoothing, cosine LR
+  scheduling, and an explicit seed. See `configs/baseline.yaml` for all values.
 
 Every checkpoint stores its model configuration and normalization metadata, so
 `src.evaluate` can reconstruct the exact architecture. Each training run writes a
