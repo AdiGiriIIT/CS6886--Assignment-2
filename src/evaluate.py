@@ -10,7 +10,8 @@ from torch import nn
 from .compression import build_quantized_model
 from .data import build_cifar10_test_loader
 from .models import build_model
-from .quantization import apply_weight_bit_map
+from .quantization import (ActivationFakeQuantizer, apply_quantizer_bit_overrides,
+                           apply_weight_bit_map)
 from .train import run_epoch
 from .utils import resolve_device, set_seed
 
@@ -37,6 +38,9 @@ def main() -> None:
         ).to(device)
         if quantization.get("realized_weight_bits"):
             apply_weight_bit_map(model, quantization["realized_weight_bits"])
+        if quantization.get("activation_overrides"):
+            apply_quantizer_bit_overrides(model, quantization["activation_overrides"],
+                                          ActivationFakeQuantizer)
     else:
         model = build_model(checkpoint["model_config"], load_pretrained=False).to(device)
     model.load_state_dict(checkpoint["state_dict"])

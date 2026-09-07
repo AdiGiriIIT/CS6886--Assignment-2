@@ -178,6 +178,52 @@ def apply_mixed_weight_policy(module: nn.Module, default_bits: int,
     return realized
 
 
+def apply_quantizer_bit_overrides(module: nn.Module, overrides: dict[str, int],
+                                  quantizer_type: type[nn.Module]) -> dict[str, int]:
+    """Apply named target-stage precision exceptions with transition-safe scales.
+
+    Names are the ``named_modules`` paths written to the activation diagnostics
+    (for activation quantizers) or returned by the coverage audit (for weight
+    wrappers).  This intentionally accepts only exact names: a misspelled
+    exception must fail rather than silently quantizing a different layer.
+    """
+    modules = dict(module.named_modules())
+    missing = sorted(set(overrides) - set(modules))
+    if missing:
+        raise ValueError(f"precision overrides contain unknown modules: {missing}")
+    applied: dict[str, int] = {}
+    for name, bits in overrides.items():
+        child = modules[name]
+        if not isinstance(child, quantizer_type):
+            raise ValueError(f"precision override target {name!r} is not a {quantizer_type.__name__}")
+        if isinstance(child, WeightFakeQuantizer):
+            if child.bits != bits:
+                with torch.no_grad():
+                    child.scale.mul_(_transition_scale_multiplier(child.bits, bits, signed=True))
+            child.bits = bits
+        elif isinstance(child, ActivationFakeQuantizer):
+            if child.bits != bits and bool(child.initialized):
+                with torch.no_grad():
+                    child.scale.mul_(_transition_scale_multiplier(child.bits, bits, child.signed))
+            child.bits = bits
+            # Keep this target-stage exception from being reset by a later
+            # global precision update (for example when resuming QAT).
+            child.fixed_bits = True
+        applied[name] = bits
+    return applied
+
+
+def apply_weight_wrapper_overrides(module: nn.Module, overrides: dict[str, int]) -> dict[str, int]:
+    """Apply exact named W-bit exceptions after category-level policies."""
+    wrappers = dict(module.named_modules())
+    quantizer_overrides: dict[str, int] = {}
+    for name, bits in overrides.items():
+        if name not in wrappers or not isinstance(wrappers[name], (QuantizedConv2d, QuantizedLinear)):
+            raise ValueError(f"weight override target {name!r} is not a quantized Conv2d or Linear")
+        quantizer_overrides[f"{name}.weight_quantizer"] = bits
+    return apply_quantizer_bit_overrides(module, quantizer_overrides, WeightFakeQuantizer)
+
+
 def apply_weight_bit_map(module: nn.Module, realized: dict[str, int]) -> None:
     """Restore the exact per-layer bit policy recorded in a checkpoint."""
     modules = dict(module.named_modules())

@@ -1,5 +1,0 @@
-policy,validation_accuracy_percent,test_accuracy_percent,accuracy_drop_vs_verified_baseline_pp,artifact_bytes,artifact_mib,weight_compression_ratio,activation_traffic_compression_ratio,status
-W8A8,92.70,92.22,0.17,2495232,2.380,3.558,4.000,accuracy-preserving
-W6A6,91.44,91.19,1.20,1944560,1.854,4.566,5.333,recommended-current-knee
-W4A6,89.70,88.76,3.63,1393888,1.329,6.370,aggressive-storage
-W4A4,82.90,81.98,10.41,1393792,1.329,6.370,diagnostic-not-recommended

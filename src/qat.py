@@ -10,7 +10,9 @@ from .compression import activation_liveness, build_quantized_model, export_pack
 from .data import CIFAR10_MEAN, CIFAR10_STD, build_cifar10_loaders
 from .models import build_model
 from .quantization import (activation_quantizer_diagnostics,
-                           apply_mixed_weight_policy, reset_activation_observers,
+                           apply_mixed_weight_policy, apply_quantizer_bit_overrides,
+                           apply_weight_wrapper_overrides, ActivationFakeQuantizer,
+                           reset_activation_observers,
                            set_quantizer_bits)
 from .train import run_epoch
 from .utils import append_csv, resolve_device, save_history_plot, set_seed
@@ -46,6 +48,10 @@ def parse_args() -> argparse.Namespace:
                         help="Target bits for depthwise Conv2d weights (mixed precision).")
     parser.add_argument("--first-last-weight-bits", type=int,
                         help="Target bits for stem and classifier weights (mixed precision).")
+    parser.add_argument("--weight-bit-override", action="append", default=[], metavar="MODULE=BITS",
+                        help="Exact named Conv2d/Linear target-stage W-bit exception; repeat as needed.")
+    parser.add_argument("--activation-bit-override", action="append", default=[], metavar="QUANTIZER=BITS",
+                        help="Exact activation-diagnostics quantizer target-stage A-bit exception; repeat as needed.")
     parser.add_argument("--epochs", type=int, default=12); parser.add_argument("--transition-epochs", type=int, default=1)
     parser.add_argument("--freeze-bn-epoch", type=int, default=10); parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--batch-size", type=int, default=128); parser.add_argument("--data-dir", default="data")
@@ -54,8 +60,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-dir", default="results/checkpoints"); parser.add_argument("--max-train-batches", type=int); parser.add_argument("--max-val-batches", type=int)
     return parser.parse_args()
 
+
+def parse_bit_overrides(values: list[str], label: str) -> dict[str, int]:
+    """Parse repeatable ``module.path=bits`` CLI exceptions defensively."""
+    parsed: dict[str, int] = {}
+    for value in values:
+        name, separator, raw_bits = value.rpartition("=")
+        if not separator or not name or not raw_bits.isdigit():
+            raise ValueError(f"{label} must be MODULE=BITS, got {value!r}")
+        bits = int(raw_bits)
+        if not 2 <= bits <= 16:
+            raise ValueError(f"{label} bit widths must be between 2 and 16")
+        if name in parsed:
+            raise ValueError(f"duplicate {label} for {name!r}")
+        parsed[name] = bits
+    return parsed
+
 def main() -> None:
     args = parse_args()
+    weight_overrides = parse_bit_overrides(args.weight_bit_override, "--weight-bit-override")
+    activation_overrides = parse_bit_overrides(args.activation_bit_override, "--activation-bit-override")
     requested_bits = [args.weight_bits, args.activation_bits, args.edge_bits,
                       args.depthwise_weight_bits, args.first_last_weight_bits]
     if any(bits is not None and not 2 <= bits <= 16 for bits in requested_bits):
@@ -93,6 +117,9 @@ def main() -> None:
             realized_weight_bits = apply_mixed_weight_policy(
                 model, args.weight_bits, args.depthwise_weight_bits,
                 args.first_last_weight_bits)
+            apply_weight_wrapper_overrides(model, weight_overrides)
+            realized_weight_bits.update(weight_overrides)
+            apply_quantizer_bit_overrides(model, activation_overrides, ActivationFakeQuantizer)
         if args.freeze_bn_epoch and epoch >= args.freeze_bn_epoch: freeze_batch_norm(model)
         started = perf_counter()
         reset_activation_observers(model)
@@ -106,7 +133,7 @@ def main() -> None:
         scheduler.step()
         append_csv(history_path, {"epoch": epoch, "weight_bits": current_w, "activation_bits": current_a, "train_loss": f"{train_loss:.6f}", "train_accuracy": f"{train_acc:.3f}", "val_loss": f"{val_loss:.6f}", "val_accuracy": f"{val_acc:.3f}", "learning_rate": f"{optimizer.param_groups[0]['lr']:.8f}"})
         at_target_precision = current_w == args.weight_bits and current_a == args.activation_bits
-        state = {"state_dict": model.state_dict(), "model_config": source["model_config"], "normalization": {"mean": CIFAR10_MEAN, "std": CIFAR10_STD}, "qat_config": resolved, "quantization_state": {"weight_bits": current_w, "activation_bits": current_a, "edge_bits": args.edge_bits, "realized_weight_bits": realized_weight_bits}, "epoch": epoch, "validation_accuracy": val_acc, "validation_size": validation_size, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "best_target_validation_accuracy": max(best_target_accuracy, val_acc) if at_target_precision else best_target_accuracy}
+        state = {"state_dict": model.state_dict(), "model_config": source["model_config"], "normalization": {"mean": CIFAR10_MEAN, "std": CIFAR10_STD}, "qat_config": resolved, "quantization_state": {"weight_bits": current_w, "activation_bits": current_a, "edge_bits": args.edge_bits, "realized_weight_bits": realized_weight_bits, "weight_overrides": weight_overrides, "activation_overrides": activation_overrides}, "epoch": epoch, "validation_accuracy": val_acc, "validation_size": validation_size, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "best_target_validation_accuracy": max(best_target_accuracy, val_acc) if at_target_precision else best_target_accuracy}
         torch.save(state, latest_checkpoint)
         if at_target_precision and val_acc > best_target_accuracy:
             best_target_accuracy = val_acc
@@ -121,13 +148,16 @@ def main() -> None:
     realized_weight_bits = apply_mixed_weight_policy(
         model, args.weight_bits, args.depthwise_weight_bits,
         args.first_last_weight_bits)
+    apply_weight_wrapper_overrides(model, weight_overrides)
+    realized_weight_bits.update(weight_overrides)
+    apply_quantizer_bit_overrides(model, activation_overrides, ActivationFakeQuantizer)
     model.eval()
     packed_path = run_dir / "deployable_model.qpk"
     size = export_packed_model(model, packed_path)
     activation = activation_liveness(model, torch.zeros((1, 3, 32, 32), device=device))
     plot_path = run_dir / "history.png"
     save_history_plot(history_path, plot_path)
-    metrics = {"run_name": run_name, "baseline_sha256": resolved["baseline_sha256"], "weight_bits": args.weight_bits, "activation_bits": args.activation_bits, "edge_bits": args.edge_bits, "depthwise_weight_bits": args.depthwise_weight_bits, "first_last_weight_bits": args.first_last_weight_bits, "realized_weight_bits": realized_weight_bits, "epochs": args.epochs, "validation_size": validation_size, "best_target_validation_accuracy": best_target_accuracy, **size.__dict__, "weight_compression_ratio": size.ratio, **activation.__dict__, "activation_compression_ratio": activation.ratio, "runtime_note": "No fake-QAT latency result: PyTorch conv2d remains floating point; benchmark an integer packed backend directly.", "best_target_checkpoint": str(best_target_checkpoint), "latest_checkpoint": str(latest_checkpoint), "deployable_artifact": str(packed_path), "history_plot": str(plot_path), "activation_diagnostics": str(diagnostics_path)}
+    metrics = {"run_name": run_name, "baseline_sha256": resolved["baseline_sha256"], "weight_bits": args.weight_bits, "activation_bits": args.activation_bits, "edge_bits": args.edge_bits, "depthwise_weight_bits": args.depthwise_weight_bits, "first_last_weight_bits": args.first_last_weight_bits, "weight_overrides": weight_overrides, "activation_overrides": activation_overrides, "realized_weight_bits": realized_weight_bits, "epochs": args.epochs, "validation_size": validation_size, "best_target_validation_accuracy": best_target_accuracy, **size.__dict__, "weight_compression_ratio": size.ratio, **activation.__dict__, "activation_compression_ratio": activation.ratio, "runtime_note": "No fake-QAT latency result: PyTorch conv2d remains floating point; benchmark an integer packed backend directly.", "best_target_checkpoint": str(best_target_checkpoint), "latest_checkpoint": str(latest_checkpoint), "deployable_artifact": str(packed_path), "history_plot": str(plot_path), "activation_diagnostics": str(diagnostics_path)}
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
     artifacts = [{"logical_name": label, "location": str(path), "sha256": sha256(path), "bytes": path.stat().st_size} for label, path in (("best_target_qat_checkpoint", best_target_checkpoint), ("latest_qat_checkpoint", latest_checkpoint), ("packed_integer_deployment_artifact", packed_path))]
     (run_dir / "artifacts.json").write_text(json.dumps(artifacts, indent=2) + "\n", encoding="utf-8")
