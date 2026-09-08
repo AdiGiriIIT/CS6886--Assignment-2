@@ -64,6 +64,19 @@ def enforce_masks(model: nn.Module, masks: dict[str, torch.Tensor]) -> None:
 
 
 @torch.no_grad()
+def masked_optimizer_step(optimizer: torch.optim.Optimizer, model: nn.Module,
+                          masks: dict[str, torch.Tensor]) -> None:
+    """Take one optimizer step and immediately restore every permanent zero.
+
+    Enforcing only at epoch boundaries lets pruned weights regrow and influence
+    later minibatches.  Keeping this operation next to the pruning primitives
+    makes the fixed-mask invariant explicit and easy to test.
+    """
+    optimizer.step()
+    enforce_masks(model, masks)
+
+
+@torch.no_grad()
 def validate_masks(model: nn.Module, masks: dict[str, torch.Tensor]) -> PruningSummary:
     """Assert permanent zeros and return exact per-layer/global sparsity."""
     modules = dict(model.named_modules()); rows = []; eligible_values = masked_values = 0

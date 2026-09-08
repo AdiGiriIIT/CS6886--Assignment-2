@@ -1,5 +1,11 @@
 # Short-horizon pruning and knowledge-distillation plan
 
+> **Implementation update:** Pruning and knowledge distillation are now
+> independent experiments. `notebooks/kd-qat.ipynb` uses supervised-only,
+> gradual fixed-mask recovery through `src.prune_qat`; KD is confined to
+> `notebooks/knowledge-distillation-qat.ipynb` and `src.distill.py`. The older
+> combined QAT+KD pruning proposal below is retained only as design history.
+
 Date: 8 September 2026
 
 ## Decision

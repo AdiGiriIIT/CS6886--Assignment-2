@@ -11,5 +11,6 @@ results/curves/*.png
 results/metrics.csv
 *artifacts/
 baseline*/
+*zip
 
 

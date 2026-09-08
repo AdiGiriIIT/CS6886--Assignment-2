@@ -5,8 +5,10 @@ from torch import nn
 from src.compression import (QuantizedInvertedResidual, activation_liveness, build_quantized_model,
                              export_packed_model, export_sparse_packed_model, fold_batch_norms, fold_conv_bn, pack_bitmap,
                              pack_signed, unpack_bitmap, unpack_signed, weight_size_breakdown)
-from src.pruning import enforce_masks, global_magnitude_masks, validate_masks
+from src.pruning import enforce_masks, global_magnitude_masks, masked_optimizer_step, validate_masks
 from src.qat import precision_for_epoch
+from src.prune_qat import scheduled_sparsity
+from src.distill import initialize_from_teacher
 from src.quantization import (ActivationFakeQuantizer, QuantizedResidualAdd,
                               apply_mixed_weight_policy, fake_quantize, integer_range, lsq_scale_init,
                               set_quantizer_bits)
@@ -103,5 +105,30 @@ class CompressionTests(unittest.TestCase):
             self.assertEqual(path.stat().st_size, size.total_bytes)
             self.assertEqual(size.masked_weight_values, expected.masked_values)
             self.assertGreater(size.bitmap_bytes, 0)
+
+    def test_masked_optimizer_step_prevents_minibatch_regrowth(self):
+        base = nn.Sequential(nn.Conv2d(3, 4, 1, bias=False), nn.ReLU6()).eval()
+        quant = build_quantized_model(base, 4, 6)
+        masks, _ = global_magnitude_masks(quant, .5); enforce_masks(quant, masks)
+        optimizer = torch.optim.SGD(quant.parameters(), lr=.1, momentum=.9)
+        loss = quant(torch.randn(2, 3, 4, 4)).sum(); loss.backward()
+        masked_optimizer_step(optimizer, quant, masks)
+        validate_masks(quant, masks)
+
+    def test_gradual_sparsity_reaches_target_monotonically(self):
+        values = [scheduled_sparsity(.5, .3, epoch, 4) for epoch in range(1, 7)]
+        self.assertEqual(values[-1], .5)
+        self.assertEqual(values[-2], .5)
+        self.assertTrue(all(left <= right for left, right in zip(values, values[1:])))
+
+    def test_narrow_student_gets_teacher_initialization(self):
+        teacher, student = nn.Sequential(nn.Linear(4, 3)), nn.Sequential(nn.Linear(2, 2))
+        with torch.no_grad():
+            teacher[0].weight.copy_(torch.arange(12).reshape(3, 4))
+            teacher[0].bias.copy_(torch.arange(3))
+        summary = initialize_from_teacher(student, teacher)
+        self.assertEqual(summary["copied_values"], summary["student_values"])
+        self.assertTrue(torch.equal(student[0].weight, teacher[0].weight[:2, :2]))
+        self.assertTrue(torch.equal(student[0].bias, teacher[0].bias[:2]))
 
 if __name__ == "__main__": unittest.main()

@@ -10,6 +10,7 @@ from torch import nn
 from .compression import build_quantized_model
 from .data import build_cifar10_test_loader
 from .models import build_model
+from .pruning import enforce_masks, validate_masks
 from .quantization import (ActivationFakeQuantizer, apply_quantizer_bit_overrides,
                            apply_weight_bit_map)
 from .train import run_epoch
@@ -44,6 +45,9 @@ def main() -> None:
     else:
         model = build_model(checkpoint["model_config"], load_pretrained=False).to(device)
     model.load_state_dict(checkpoint["state_dict"])
+    if checkpoint.get("pruning_masks"):
+        enforce_masks(model, checkpoint["pruning_masks"])
+        validate_masks(model, checkpoint["pruning_masks"])
     loss, accuracy = run_epoch(model, test_loader, nn.CrossEntropyLoss(), device)
     print(f"Checkpoint: {args.checkpoint}\nTest loss: {loss:.4f}\nTest top-1 accuracy: {accuracy:.2f}%")
 

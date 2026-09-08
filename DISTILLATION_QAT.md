@@ -1,4 +1,11 @@
-Yes—this is feasible within 24 hours if we test only one student, preferably MobileNetV2 `width_mult=0.75`.
+> **Implementation update:** The earlier random-initialization pilot described
+> below has been superseded by `notebooks/knowledge-distillation-qat.ipynb` and
+> `src/distill.py`. The width-0.75 student is now initialized by consistently
+> slicing compatible tensors from the ImageNet-pretrained, CIFAR-10-fine-tuned
+> teacher, then trained for 60 FP32 epochs with the baseline augmentation and
+> optimizer settings before 12 epochs of QAT + KD.
+
+Yes—this is feasible if we test only one student, preferably MobileNetV2 `width_mult=0.75`.
 
 The clean sequence is:
 
