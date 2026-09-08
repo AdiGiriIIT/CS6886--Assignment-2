@@ -184,6 +184,19 @@ class DeploymentSize:
     def ratio(self) -> float: return self.fp32_weight_bytes / self.total_bytes
 
 
+@dataclass(frozen=True)
+class SparseDeploymentSize(DeploymentSize):
+    """Byte-exact accounting for QPK2's bitmap sparse weight sections."""
+    sparse_weight_bytes: int
+    bitmap_bytes: int
+    eligible_weight_values: int
+    stored_nonzero_values: int
+    masked_weight_values: int
+    @property
+    def eligible_sparsity(self) -> float:
+        return 0.0 if not self.eligible_weight_values else self.masked_weight_values / self.eligible_weight_values
+
+
 def _quantized_weight_codes(module: QuantizedConv2d | QuantizedLinear) -> torch.Tensor:
     bits = module.weight_quantizer.bits
     qn, qp = integer_range(bits, True)
@@ -194,6 +207,26 @@ def _align(blob: bytearray, alignment: int = 16) -> int:
     padding = (-len(blob)) % alignment
     blob.extend(b"\0" * padding)
     return padding
+
+
+def pack_bitmap(values: torch.Tensor) -> bytes:
+    """Pack a boolean occupancy bitmap least-significant-bit first."""
+    flat = values.detach().cpu().reshape(-1).to(torch.bool).tolist()
+    return bytes(sum((int(value) << (index % 8)) for index, value in enumerate(flat[start:start + 8]))
+                 for start in range(0, len(flat), 8))
+
+
+def unpack_bitmap(payload: bytes, count: int) -> torch.Tensor:
+    if len(payload) != math.ceil(count / 8):
+        raise ValueError("bitmap size does not match element count")
+    return torch.tensor([bool(payload[index // 8] & (1 << (index % 8))) for index in range(count)])
+
+
+def is_sparse_eligible(module: nn.Module) -> bool:
+    """The audited W4 1x1 group; edge and depthwise layers remain dense."""
+    return (isinstance(module, QuantizedConv2d)
+            and module.weight_quantizer.bits == 4
+            and tuple(module.weight.shape[-2:]) == (1, 1))
 
 
 def _fp32_deployable_bytes(model: nn.Module) -> int:
@@ -269,6 +302,95 @@ def export_packed_model(model: nn.Module, path: str | Path) -> DeploymentSize:
                             requantization_bytes, len(descriptor_blob), padding, header_bytes, len(blob))
     if result.total_bytes != Path(path).stat().st_size:
         raise AssertionError("packed artifact byte count disagrees with accounting")
+    return result
+
+
+def export_sparse_packed_model(model: nn.Module, path: str | Path,
+                               masks: dict[str, torch.Tensor]) -> SparseDeploymentSize:
+    """Write QPK2, using a bitmap plus packed non-zero codes for audited W4 1x1 tensors.
+
+    The representation is deliberately backend-neutral and records every shape,
+    bitmap length, and non-zero-code count.  It does *not* imply sparse-kernel
+    speedup. ``masks`` must use the wrapper names from ``named_modules()`` and
+    is checked so accidentally regrown masked weights cannot be exported.
+    """
+    model = fold_batch_norms(model)
+    weights = [(name, m) for name, m in model.named_modules()
+               if isinstance(m, (QuantizedConv2d, QuantizedLinear))]
+    activations = [(name, m) for name, m in model.named_modules()
+                   if isinstance(m, ActivationFakeQuantizer)]
+    eligible_names = {name for name, module in weights if is_sparse_eligible(module)}
+    unknown = set(masks) - eligible_names
+    missing = eligible_names - set(masks)
+    if unknown or missing:
+        raise ValueError(f"sparse masks must cover exactly eligible W4 1x1 tensors; unknown={sorted(unknown)}, missing={sorted(missing)}")
+    sections: list[bytes] = []
+    scales = bytearray(); biases = bytearray(); requant = bytearray(); descriptors = []
+    packed_weight_bytes = sparse_weight_bytes = bitmap_bytes = weight_scale_bytes = int32_bias_bytes = requantization_bytes = 0
+    eligible_weight_values = stored_nonzero_values = masked_weight_values = 0
+    default_input_scale = float(activations[0][1].scale.detach().clamp_min(1e-8)) if activations else 1.0
+    for name, module in weights:
+        codes, bits = _quantized_weight_codes(module), module.weight_quantizer.bits
+        scale = module.weight_quantizer.scale.detach().reshape(-1).float().cpu()
+        scale_offset = len(scales); scales.extend(scale.numpy().tobytes())
+        bias_offset = len(biases)
+        if module.bias is not None:
+            denominator = (scale * default_input_scale).clamp_min(1e-12)
+            bias_codes = torch.round(module.bias.detach().cpu() / denominator).clamp(-(2**31), 2**31 - 1).to(torch.int32)
+            biases.extend(bias_codes.numpy().tobytes())
+        rq_offset = len(requant); requant.extend(struct.pack("<ii", 1 << 30, 30) * module.weight.shape[0])
+        descriptor = {"name": name, "shape": list(module.weight.shape), "bits": bits, "signed": True,
+                      "count": module.weight.numel(), "weight_scale_offset": scale_offset,
+                      "weight_scale_count": module.weight.shape[0], "bias_offset": bias_offset,
+                      "bias_count": 0 if module.bias is None else module.bias.numel(),
+                      "requant_offset": rq_offset, "requant_count": module.weight.shape[0],
+                      "input_scale": default_input_scale}
+        if name in eligible_names:
+            mask = masks[name].detach().to(device=codes.device, dtype=torch.bool)
+            if tuple(mask.shape) != tuple(codes.shape):
+                raise ValueError(f"mask shape for {name} is {tuple(mask.shape)}, expected {tuple(codes.shape)}")
+            if bool((module.weight.detach()[~mask] != 0).any()):
+                raise AssertionError(f"masked master weights regrew in {name}")
+            occupancy = codes.ne(0)
+            # Every pruned master value must serialize as a zero code.
+            if bool(occupancy[~mask].any()):
+                raise AssertionError(f"masked quantized codes are nonzero in {name}")
+            bitmap, nonzero = pack_bitmap(occupancy), pack_signed(codes[occupancy], bits)
+            sections.extend((bitmap, nonzero))
+            descriptor.update({"storage": "bitmap_nonzero_codes", "bitmap_bytes": len(bitmap),
+                               "nonzero_count": int(occupancy.sum()), "payload_bytes": len(nonzero)})
+            bitmap_bytes += len(bitmap); sparse_weight_bytes += len(nonzero)
+            eligible_weight_values += codes.numel(); stored_nonzero_values += int(occupancy.sum())
+            masked_weight_values += int((~mask).sum())
+        else:
+            payload = pack_signed(codes, bits); sections.append(payload)
+            descriptor.update({"storage": "dense_codes", "payload_bytes": len(payload)})
+            packed_weight_bytes += len(payload)
+        descriptors.append(descriptor)
+        weight_scale_bytes += scale.numel() * 4
+        int32_bias_bytes += 0 if module.bias is None else module.bias.numel() * 4
+        requantization_bytes += module.weight.shape[0] * 8
+    activation_blob = bytearray()
+    for _, quantizer in activations:
+        activation_blob.extend(struct.pack("<f", float(quantizer.scale.detach().clamp_min(1e-8))))
+    descriptor_doc = {"format": "QPK2", "version": 2, "endianness": "little", "alignment": 16,
+                      "zero_points": "implicit zero (symmetric / ReLU6 unsigned)", "weights": descriptors,
+                      "activation_boundaries": [{"name": n, "bits": q.bits, "signed": q.signed} for n, q in activations]}
+    descriptor_blob = json.dumps(descriptor_doc, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    blob = bytearray(struct.pack("<4sII", b"QPK2", 2, len(descriptor_blob))); blob.extend(descriptor_blob)
+    header_bytes = 12; padding = _align(blob)
+    for section in sections:
+        blob.extend(section); padding += _align(blob)
+    for section in (scales, biases, activation_blob, requant):
+        blob.extend(section); padding += _align(blob)
+    Path(path).parent.mkdir(parents=True, exist_ok=True); Path(path).write_bytes(blob)
+    result = SparseDeploymentSize(_fp32_deployable_bytes(fold_batch_norms(_unwrap_quantized_model(model))),
+                                  packed_weight_bytes + sparse_weight_bytes, weight_scale_bytes, len(activation_blob),
+                                  int32_bias_bytes, requantization_bytes, len(descriptor_blob), padding, header_bytes,
+                                  len(blob), sparse_weight_bytes, bitmap_bytes, eligible_weight_values,
+                                  stored_nonzero_values, masked_weight_values)
+    if result.total_bytes != Path(path).stat().st_size:
+        raise AssertionError("sparse packed artifact byte count disagrees with accounting")
     return result
 
 

@@ -1,15 +1,14 @@
 # Quantization status and Q3/Q4 handoff
 
-Date: 8 September 2026. This document is based only on the current artifacts
-in `Single_Precision_artifacts/` and `Mixed_Precision_artifacts/`. All seven
-QAT runs used the same improved FP32 baseline SHA-256:
+Date: 8 September 2026. This handoff uses the updated artifacts in
+`Single_Precision_artifacts/` and `Mixed_Precision_artifacts/` only. Every QAT
+run uses the same improved FP32 baseline SHA-256:
 `73a0bc35a65ebd049fc8b698f2816b3feb6ed1b53e41ec373c674c325a1f2837`.
-Its held-out CIFAR-10 test top-1 is **93.69%**. Runs use seed 6886, a fixed
-45,000/5,000 train/validation split, 12 QAT epochs, a 8→6→target transition,
-and validation-selected checkpoints. The test accuracies below are the saved
-held-out evaluations of those selected checkpoints.
+That baseline achieves **93.69%** held-out CIFAR-10 top-1. All runs use a
+12-epoch 8→6→target QAT schedule and choose a checkpoint using the 5,000-image
+validation split before held-out test evaluation.
 
-## Current results
+## Complete current frontier
 
 | Policy | Validation top-1 | Test top-1 | Drop vs 93.69 | QPK size | Weight ratio | Activation traffic ratio |
 |---|---:|---:|---:|---:|---:|---:|
@@ -18,105 +17,89 @@ held-out evaluations of those selected checkpoints.
 | W4A6 | 91.96% | 90.75% | 2.94 pp | 1.329 MiB | 6.370x | 5.330x |
 | W4A4 | 86.92% | 85.68% | 8.01 pp | 1.329 MiB | 6.370x | 7.992x |
 | W4A6 + W8 stem/classifier | 92.10% | 91.00% | 2.69 pp | 1.336 MiB | 6.338x | 5.330x |
-| W4A6 + W6 depthwise + W8 stem/classifier | 92.52% | 91.62% | 2.07 pp | 1.351 MiB | 6.267x | 5.330x |
-| Previous policy + A8 input/logits | 92.38% | **91.65%** | **2.04 pp** | 1.351 MiB | 6.267x | 5.321x |
+| W4A6 + W6 depthwise | 92.14% | 91.40% | 2.29 pp | 1.345 MiB | 6.297x | 5.330x |
+| W4A6 + W6 depthwise + W8 stem/classifier | **92.52%** | 91.62% | 2.07 pp | 1.351 MiB | 6.267x | **5.330x** |
+| Previous policy + A8 input/logits | 92.38% | 91.65% | 2.04 pp | 1.351 MiB | 6.267x | 5.320x |
+| Previous policy + A8 stem ReLU6 | 92.32% | 91.58% | 2.11 pp | 1.351 MiB | 6.267x | 5.232x |
+| Previous policy + A8 stem and first-block ReLU6 | 92.30% | **91.76%** | **1.93 pp** | 1.351 MiB | 6.267x | 5.138x |
 
-MiB means bytes divided by 2^20. QPK size includes packed codes, per-channel
-scales, activation scales, int32 biases, requantization fields, descriptors,
-padding, and header. Activation ratio is forward boundary traffic at batch one,
-input shape `1×3×32×32`: `fp32_traffic_bytes / quantized_traffic_bytes`.
+MiB means bytes / 2^20. The QPK total includes packed codes, scales, int32
+biases, requantization fields, descriptors, padding, and header. Activation
+traffic is batch-one forward boundary traffic for `1×3×32×32`, calculated as
+`fp32_traffic_bytes / quantized_traffic_bytes`.
 
-## Interpretation
+## Result of the additional sensitivity-guided experiments
 
-W6A6 is the accuracy-oriented point: 0.88 pp loss, 4.566x packed-weight
-reduction, and 5.330x activation-traffic reduction. The compact mixed point is
-W4A6 plus W6 depthwise and W8 stem/classifier: 1.351 MiB, 27.14% smaller than
-W6A6, for an additional 1.24 pp test loss. A8 input/logits is not material:
-it gains only 0.03 pp test accuracy and has lower validation accuracy than the
-otherwise identical A6-edge run (92.38% versus 92.52%).
+The depthwise-only W6 test confirms that W8 stem/classifier weights are useful:
+adding them costs just 6,832 bytes (0.48% of the compact QPK) but raises
+validation accuracy by 0.38 pp and test accuracy by 0.22 pp. Retain both
+weight exceptions.
 
-W8 stem/classifier weights recover 0.25 pp over W4A6. Raising all depthwise
-weights to W6 then recovers another 0.62 pp, making depthwise weights the
-strongest demonstrated exception. W4A4 is dominated by W4A6: both QPKs are
-1.329 MiB, while W4A4 loses a further 5.07 pp on test.
+The internal-A8 hypothesis is not validated under the correct selection
+protocol. Stem-only A8 lowers validation and test accuracy relative to the
+all-A6 compact policy. Two early A8 boundaries produce the highest observed
+test result (91.76%), but have **lower validation accuracy** (92.30% versus
+92.52%) and 3.74% more activation traffic. Since the test set must not select
+the precision policy, the 0.14 pp test difference is treated as seed/test
+variation rather than evidence for the A8 exceptions. A8 input/logits is also
+validation-negative and only adds 0.03 pp test accuracy.
 
-The diagnostics support one narrow activation experiment. In the W4/W6/W8-A6
-run, stem ReLU6 `model.features.0.2.activation_quantizer` is the clear internal
-hotspot (4.243% saturation; next internal boundary 0.129%). In W4A6,
-`model.features.1.conv.0.2.activation_quantizer` reaches 5.600% and stem is
-2.772%. These are the only justified internal A8 candidates.
+W4A4 remains dominated by W4A6: it has the same 1.329 MiB QPK but loses a
+further 5.07 pp test accuracy.
 
-## Remaining targeted experiments
+## Robustness check: all-A6 versus early-A8
 
-Do not launch another broad sweep. Run these in order, selecting on validation
-and evaluating held-out test only after selection. `BASELINE_CKPT` must be the
-improved-baseline copy with SHA-256
-`73a0bc35a65ebd049fc8b698f2816b3feb6ed1b53e41ec373c674c325a1f2837`.
+The robustness artifacts contain two additional paired QAT seeds for the two
+policies. Raw validation values should be compared *within a seed*, not pooled
+across seeds, because the QAT seed also defines the train/validation split.
 
-### 1. Depthwise-only W6
+| Seed | All-A6 validation | All-A6 test | Early-A8 validation | Early-A8 test | Early-A8 − all-A6 validation | Early-A8 − all-A6 test |
+|---:|---:|---:|---:|---:|---:|---:|
+| 6886 | 92.52% | 91.62% | 92.30% | 91.76% | -0.22 pp | +0.14 pp |
+| 1234 | 96.84% | 91.59% | 97.04% | 91.69% | +0.20 pp | +0.10 pp |
+| 2026 | 96.52% | 91.54% | 96.54% | 91.45% | +0.02 pp | -0.09 pp |
+| Mean / range | — | **91.58%** / 91.54–91.62% | — | **91.63%** / 91.45–91.76% | 0.00 pp mean | +0.05 pp mean |
 
-This tests whether W8 stem/classifier weights are required after upgrading
-depthwise weights, and is the highest-value missing ablation.
+Early A8 has no stable validation advantage: its paired validation differences
+average exactly 0.00 pp. Its +0.05 pp mean test difference is smaller than its
+seed-to-seed variation and reverses at seed 2026. It also raises quantized
+activation traffic from 437,968 to 454,352 bytes (+3.74%), reducing the
+activation-traffic ratio from 5.330x to 5.138x. Its test range is wider than
+all-A6 (0.31 pp versus 0.08 pp). Therefore it does not justify the additional
+activation precision.
 
-```bash
-BASELINE_CKPT=results/checkpoints/baseline.pt
-DATA_DIR=/path/to/cifar10
+## Final selected candidate
 
-python -m src.qat --checkpoint "$BASELINE_CKPT" --data-dir "$DATA_DIR" --device cuda \
-  --weight-bits 4 --activation-bits 6 --depthwise-weight-bits 6 --epochs 12 \
-  --run-name mp-w4dw6-a6-seed6886
+Finalize this compact policy:
 
-python -m src.evaluate \
-  --checkpoint results/checkpoints/qat-mp-w4dw6-a6-seed6886-best-target.pt \
-  --data-dir "$DATA_DIR" --device cuda
+```text
+Default:          W4 / A6
+Depthwise weights: W6
+Stem weights:      W8
+Classifier weights: W8
+All activations:   A6 (no input/logit or internal A8 exceptions)
 ```
 
-### 2. Stem-only A8 on compact mixed precision
+This is `mp-w4dw6edgew8-a6`: **91.58% mean held-out test top-1** over seeds
+6886, 1234, and 2026 (range 91.54–91.62%), **1.351 MiB**, **6.267x** weight
+reduction, and **5.330x** activation-traffic reduction. It has the same packed
+weight size as the early-A8 policy, materially better activation compression,
+and the more stable test result. This is the best balanced, defensible compact
+operating point.
 
-This targets the 4.243%-saturated internal stem boundary, rather than repeating
-the unconvincing input/logit A8 exception.
+W6A6 is the accuracy-oriented comparator, not the selected compact candidate:
+it reaches 92.81% test but is 37.25% larger than the selected QPK (1.854 MiB
+versus 1.351 MiB) and has the same activation-traffic ratio.
 
-```bash
-python -m src.qat --checkpoint "$BASELINE_CKPT" --data-dir "$DATA_DIR" --device cuda \
-  --weight-bits 4 --activation-bits 6 --depthwise-weight-bits 6 \
-  --first-last-weight-bits 8 --epochs 12 \
-  --activation-bit-override model.features.0.2.activation_quantizer=8 \
-  --run-name mp-w4dw6edgew8-a6-stem-a8-seed6886
+## Deployment scope
 
-python -m src.evaluate \
-  --checkpoint results/checkpoints/qat-mp-w4dw6edgew8-a6-stem-a8-seed6886-best-target.pt \
-  --data-dir "$DATA_DIR" --device cuda
-```
-
-### 3. Only if stem A8 helps: two early A8 boundaries
-
-Add the first inverted-residual ReLU6 boundary. Do not promote later boundaries
-without comparable saturation in a newly produced diagnostic.
-
-```bash
-python -m src.qat --checkpoint "$BASELINE_CKPT" --data-dir "$DATA_DIR" --device cuda \
-  --weight-bits 4 --activation-bits 6 --depthwise-weight-bits 6 \
-  --first-last-weight-bits 8 --epochs 12 \
-  --activation-bit-override model.features.0.2.activation_quantizer=8 \
-  --activation-bit-override model.features.1.conv.0.2.activation_quantizer=8 \
-  --run-name mp-w4dw6edgew8-a6-early-a8-seed6886
-```
-
-`--activation-bit-override QUANTIZER=BITS` is an exact named-boundary
-exception, recorded in the run configuration/checkpoint and restored by
-`src.evaluate` and `src.export_deploy`.
-
-## Stop rule and reporting
-
-Keep a new policy only if its validation gain exceeds normal seed variation
-while retaining a preferred size/accuracy frontier. If none meaningfully beats
-the compact mixed policy, stop. Rerun W6A6 and the final compact policy with
-two additional seeds and report mean/range. Do not claim latency, throughput,
-or energy gains: QPK is byte-exact packed-storage accounting, not a validated
-integer-kernel deployment.
+The artifacts establish fake-QAT accuracy and byte-exact packed-storage
+accounting. They do not establish latency, throughput, energy, or numerical
+equivalence of exported integer inference, because the QPK has no validated
+integer convolution backend.
 
 ## Artifact locations
 
-- Uniform metrics and test logs: `Single_Precision_artifacts/*/experiments/sweeps/*/metrics.json` and `Single_Precision_artifacts/*/results/logs/*-held-out-test.log`.
-- Mixed metrics and test logs: `Mixed_Precision_artifacts/*/experiments/sweeps/*/metrics.json` and `Mixed_Precision_artifacts/*/results/logs/*-held-out-test.log`.
-- Saturation evidence: each run's `activation_quantization_diagnostics.csv`.
+- Uniform policies: `Single_Precision_artifacts/*/experiments/sweeps/*/metrics.json` and associated held-out logs.
+- Mixed policies: `Mixed_Precision_artifacts/*/experiments/sweeps/*/metrics.json` and associated held-out logs.
+- Saturation diagnostics: each sweep's `activation_quantization_diagnostics.csv`.

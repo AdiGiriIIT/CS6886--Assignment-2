@@ -99,6 +99,26 @@ reconciled Q3/Q4 table, current QPK limitations, and recommended experiment
 order. Packed size and activation-byte accounting are supported; an
 integer-kernel latency/energy speedup is not yet measured.
 
+## Distillation and sparse-pruning experiments
+
+The Kaggle-ready [pruning/distillation notebook](notebooks/pruning_distillation_kaggle.ipynb)
+implements the two follow-up documents.  Its default experiment reconstructs
+the selected mixed-precision QAT **resume checkpoint**, measures 30/40/50%
+global magnitude masks over only W4 1×1 convolutions, and recovers the two
+best validation candidates with four epochs of fixed-mask QAT + KD.  It writes
+a `QPK2` artifact with an occupancy bitmap and packed non-zero codes; this is
+the only pruning result that may report a storage ratio above the dense QPK's
+6.2×.  It makes no sparse-latency claim.
+
+For the dense width-0.75 alternative in `DISTILLATION_QAT.md`:
+
+```bash
+python -m src.distill --stage fp32 --teacher-checkpoint results/checkpoints/baseline.pt --width-mult 0.75 --epochs 30 --device cuda
+python -m src.distill --stage qat --teacher-checkpoint results/checkpoints/baseline.pt \
+  --student-checkpoint experiments/student_distillation/mobilenetv2-0.75-fp32-kd-seed6886/best.pt \
+  --width-mult 0.75 --epochs 10 --device cuda
+```
+
 `results/tables/baseline_manifest.json` records the required SHA-256 of the
 immutable checkpoint. Verify it before any sweep with `sha256sum
 results/checkpoints/baseline.pt`.

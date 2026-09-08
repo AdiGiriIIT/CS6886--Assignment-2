@@ -1,0 +1,120 @@
+\section{Question 3: Compression Results}
+
+\subsection{(a) Compression sweep}
+
+I evaluated quantization-aware training (QAT) at four uniform precisions and
+then used the uniform W4/A6 result to guide a small mixed-precision sweep.
+Every run started from the same immutable FP32 MobileNetV2 checkpoint (held-out
+CIFAR-10 top-1: 93.69\%), used seed 6886, and followed the same 12-epoch
+W8/A8 $\rightarrow$ W6/A6 $\rightarrow$ target-precision schedule. The
+5,000-image validation split selected the checkpoint; the official 10,000-image
+test set was evaluated only after selection. Model size is the byte-verified
+packed \texttt{QPK1} artifact, including scales, biases, requantization fields,
+descriptors, padding, and header.
+
+\begin{table}[H]
+    \centering
+    \small
+    \caption{Uniform QAT sweep. Accuracy drop is relative to the 93.69\% FP32 held-out test baseline. Activation ratio is FP32 boundary traffic divided by quantized boundary traffic for batch-one $1\times3\times32\times32$ inference.}
+    \label{tab:q3-uniform-sweep}
+    \begin{tabular}{lrrrrrr}
+        \toprule
+        Policy & Val. top-1 & Test top-1 & Drop & QPK (MiB) & Weight $\times$ & Activation $\times$ \\
+        \midrule
+        W8/A8 & 93.60\% & 93.03\% & 0.66 pp & 2.380 & 3.558 & 3.998 \\
+        W6/A6 & 93.46\% & 92.81\% & 0.88 pp & 1.854 & 4.566 & 5.330 \\
+        W4/A6 & 91.96\% & 90.75\% & 2.94 pp & 1.329 & 6.370 & 5.330 \\
+        W4/A4 & 86.92\% & 85.68\% & 8.01 pp & 1.329 & 6.370 & 7.992 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+The uniform sweep separates weight and activation sensitivity. Reducing from
+W8/A8 to W6/A6 reduces the packed artifact by 22.1\% (2.380 to 1.854 MiB) for
+only a 0.22 pp test reduction. In contrast, W4/A4 has the same packed model
+size as W4/A6 but loses a further 5.07 pp test accuracy. Thus activations,
+rather than storage-dominant weights, are the limiting factor at four bits.
+
+Because W4/A6 retained useful accuracy, I tested sensitivity-motivated weight
+exceptions: W6 for depthwise convolutions and W8 for the stem and classifier.
+These exceptions increase the artifact by only 22 KiB over uniform W4/A6 while
+recovering 0.87 pp held-out accuracy.
+
+\begin{table}[H]
+    \centering
+    \small
+    \caption{Mixed-precision follow-up at A6. The default weights are W4.}
+    \label{tab:q3-mixed-sweep}
+    \begin{tabular}{lrrrr}
+        \toprule
+        Weight policy & Val. top-1 & Test top-1 & QPK (MiB) & Weight $\times$ \\
+        \midrule
+        Uniform W4 & 91.96\% & 90.75\% & 1.329 & 6.370 \\
+        W4 + W8 stem/classifier & 92.10\% & 91.00\% & 1.336 & 6.338 \\
+        W4 + W6 depthwise & 92.14\% & 91.40\% & 1.345 & 6.297 \\
+        W4 + W6 depthwise + W8 stem/classifier & \textbf{92.52\%} & \textbf{91.62\%} & 1.351 & 6.267 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{(b) Accuracy comparison and selected operating point}
+
+\begin{itemize}
+    \item \textbf{Accuracy-oriented setting:} W6/A6 reaches 92.81\% test
+    top-1, a 0.88 pp reduction from FP32, with a 4.566$\times$ packed-weight
+    reduction.
+    \item \textbf{Best compact setting:} W4 default weights, W6 depthwise
+    weights, W8 stem/classifier weights, and A6 activations reaches 91.62\%
+    test top-1 at 1.351 MiB. This is 6.267$\times$ smaller in packed weights
+    and reduces activation traffic by 5.330$\times$.
+    \item \textbf{Rejected setting:} W4/A4 is dominated by W4/A6: both use a
+    1.329 MiB artifact, but W4/A4 has only 85.68\% test top-1. It saves
+    activation traffic, but not model storage, at an unjustified accuracy cost.
+\end{itemize}
+
+For robustness, the selected mixed policy was re-run with seeds 1234 and
+2026. Its held-out accuracies were 91.59\% and 91.54\%, respectively; across
+the three seeds the mean is \textbf{91.58\%} (range 91.54--91.62\%). This
+supports reporting it as the final compact operating point, while W6/A6 is the
+appropriate alternative when the additional 0.503 MiB is acceptable.
+
+\subsection{W\&B Parallel Coordinates chart}
+
+The chart uses one line per QAT run, with axes
+\texttt{weight\_bits}, \texttt{activation\_bits},
+\texttt{weight\_exception\_layers}, \texttt{model\_size\_mib},
+\texttt{weight\_compression\_ratio},
+\texttt{activation\_traffic\_compression\_ratio}, and
+\texttt{test\_accuracy}. Color lines by \texttt{test\_accuracy}; this makes
+the W4/A4 accuracy cliff and the W4/A6 mixed-precision recovery visible. The
+upload utility derives these fields from immutable \texttt{metrics.json} files
+and held-out-test logs, so the dashboard is reproducible rather than hand-entered.
+
+\begin{verbatim}
+python -m pip install -r requirements.txt
+wandb login
+python -m src.upload_wandb_results --project cs6886-assignment2
+\end{verbatim}
+
+In the W\&B project workspace, select \emph{Add panel} $\rightarrow$
+\emph{Parallel Coordinates}, add the listed config/summary fields as axes,
+set line color to \texttt{test\_accuracy}, then download the panel as a PNG.
+Save it as \texttt{wandb\_parallel\_coordinates.png} beside this \LaTeX{} file;
+the figure below is included automatically when that export is present.
+
+\begin{figure}[H]
+    \centering
+    \IfFileExists{wandb_parallel_coordinates.png}{
+        \includegraphics[width=\linewidth]{wandb_parallel_coordinates.png}
+    }{\fbox{\parbox{0.88\linewidth}{\centering
+        Export the W\&B Parallel Coordinates panel as
+        \texttt{wandb\_parallel\_coordinates.png} and place it beside
+        \texttt{Q\_3.tex}.}}}
+    \caption{W\&B Parallel Coordinates view of the Q3 compression sweep. Lines are colored by held-out test top-1 accuracy.}
+    \label{fig:q3-wandb-parallel-coordinates}
+\end{figure}
+
+The chart is a decision aid rather than a substitute for the table: validation
+accuracy, not held-out test accuracy, selected the policy. No latency or energy
+claim is made because QAT uses FP32 PyTorch kernels on fake-quantized tensors;
+the QPK artifact establishes storage and activation-byte accounting only.

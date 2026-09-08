@@ -1,0 +1,169 @@
+\section{Question 2: Model Compression Implementation}
+
+\subsection{(a) Configurable compression method}
+
+\textbf{Choice of method.} I use quantization-aware training (QAT) with a
+configurable mixed-precision policy. QAT is preferred over ordinary
+post-training quantization (PTQ) for the target low precisions because PTQ
+only calibrates a completed FP32 model, whereas QAT lets the weights and
+quantization ranges adapt to rounding and clipping error during fine-tuning.
+This is especially relevant to MobileNetV2: its depthwise layers, narrow
+linear bottlenecks, and residual additions make it sensitive to poorly chosen
+scales. Jacob \emph{et al.} report that training co-designed with quantization
+improves the accuracy--latency trade-off for MobileNets
+\cite{jacob2018quantization}; LSQ and PACT further show that learned step
+sizes and learned activation clipping are effective at low precision
+\cite{esser2020lsq,choi2018pact}. PTQ is nevertheless retained in this
+repository as a diagnostic for checking quantizer coverage and identifying
+range-sensitive layers before QAT.
+
+\paragraph{Quantizer used during QAT.}
+For a value $v$, positive scale $s$, and integer bounds $Q_n,Q_p$, the
+forward pass uses
+\[
+ q = \operatorname{clip}\!\left(\operatorname{round}(v/s),Q_n,Q_p\right),
+ \qquad \widehat v=sq.
+\]
+Here $\widehat v$ is the dequantized FP32 value consumed by the next PyTorch
+operation. Rounding uses a straight-through estimator (STE): it is discrete in
+the forward pass but has an identity surrogate gradient in the backward pass.
+Thus, the model learns under the error that integer rounding and clipping would
+introduce, while the master weights and optimizer state remain FP32.
+
+\begin{itemize}
+    \item \textbf{Weights:} every convolution and linear weight tensor uses
+    symmetric signed quantization with
+    $Q_n=-(2^{b-1}-1)$ and $Q_p=2^{b-1}-1$. One learned FP32 scale is stored
+    for each output channel. The scale is initialized using the LSQ rule and
+    receives LSQ-style gradient scaling.
+    \item \textbf{ReLU6 outputs:} these are non-negative and bounded, so they
+    use unsigned levels $[0,2^b-1]$, one learned scale per tensor, and initial
+    scale $6/(2^b-1)$. This is a PACT-like learned clipping-range treatment.
+    \item \textbf{Signed activation boundaries:} normalized input,
+    linear-projection outputs, residual operands/results, and logits can be
+    negative. They therefore use a symmetric signed, learned per-tensor scale.
+    \item \textbf{Residual addition:} the skip and main-branch operands are
+    fake-quantized with the \emph{same} signed scale before addition; the sum
+    is quantized again with that boundary scale. This prevents invalid integer
+    addition of tensors represented by unrelated scales.
+    \item \textbf{Precision schedule:} a QAT candidate progresses from W8/A8
+    to W6/A6 and then to its requested target. The final target policy is
+    validation-selected only after it has been reached.
+\end{itemize}
+
+\paragraph{Training and export procedure.}
+
+\begin{itemize}
+    \item Each QAT run begins from the same immutable FP32 baseline checkpoint.
+    The implementation fine-tunes for 12 epochs using SGD with Nesterov
+    momentum, cosine decay, and a separate zero-weight-decay parameter group
+    for learned quantizer scales.
+    \item BatchNorm remains FP32 during the adaptation phase, then its running
+    statistics and affine parameters are frozen from epoch 10.
+    \item The best target-precision checkpoint is selected on the fixed
+    5,000-image validation split. The test set is not used to select a bit
+    policy.
+    \item At export, each adjacent Conv--BatchNorm pair is folded. The
+    exporter packs integer weight codes and writes the scales, int32 biases,
+    requantization fields, descriptors, alignment padding, and header into a
+    custom \texttt{QPK1} artifact.
+\end{itemize}
+
+\subsection{(b) Applying QAT to MobileNetV2}
+
+The wrappers in \texttt{src/quantization.py} and
+\texttt{src/compression.py} replace all eligible \texttt{Conv2d},
+\texttt{Linear}, and \texttt{ReLU6} modules. They also add explicit
+quantizers at graph boundaries that are not represented by a standalone
+torchvision layer. The exact policy is summarized in
+Table~\ref{tab:q2-coverage}.
+
+\begin{table}[H]
+    \centering
+    \small
+    \caption{QAT coverage for MobileNetV2. The selected compact policy is W4/A6 with W6 depthwise weights and W8 stem/classifier weights.}
+    \label{tab:q2-coverage}
+    \begin{tabular}{p{0.27\linewidth}p{0.39\linewidth}p{0.22\linewidth}}
+        \toprule
+        Layer or boundary & Fake-quantization operation & Selected precision \\
+        \midrule
+        Normalized image input and final logits & Learned per-tensor signed activation quantizer & A6 \\
+        Stem convolution and classifier & Per-output-channel signed weight quantizer; convolution/linear is evaluated on dequantized FP32 values during QAT & W8 weights \\
+        Expansion and projection $1\times1$ convolutions & Per-output-channel signed weight quantizer; a non-residual projection output receives a signed activation quantizer & W4 weights; A6 boundary \\
+        Depthwise $3\times3$ convolutions & Per-output-channel signed weight quantizer; no depthwise layer is omitted & W6 weights \\
+        ReLU6 & ReLU6 followed by learned per-tensor unsigned fake quantization & A6 \\
+        Residual addition & Fake-quantize skip and branch with one shared signed scale, add, then fake-quantize the result & A6 \\
+        BatchNorm & Retained in FP32 for QAT adaptation; folded into the preceding convolution for export & Folded; no separate stored BN \\
+        Pooling, flatten, and dropout & No weights are quantized; dropout is disabled at inference & No stored payload \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+The policy is configurable from the command line. The default bit width is
+applied to all quantized convolution and linear layers; optional controls can
+raise only depthwise weights or the first and last weighted layers. Exact named
+overrides are checked against the model graph, so a misspelled layer cannot be
+silently skipped. A coverage audit records each weighted module's name, shape,
+bit width, scale shape, signedness, and exception reason.
+
+\subsection{(c) Storage overheads and deployment limitations}
+
+\paragraph{Storage accounting.} The reported size is the deployment artifact,
+not a PyTorch checkpoint. The checkpoint is intentionally larger because it
+contains FP32 master weights, optimizer state, and QAT state needed to resume
+training. The \texttt{QPK1} exporter instead charges all inference-time
+components:
+
+\begin{itemize}
+    \item packed signed weight codes: $\lceil Nb/8\rceil$ bytes for $N$
+    weights at $b$ bits;
+    \item one FP32 scale per output channel for each convolution or linear
+    layer, plus one FP32 scale per activation boundary;
+    \item int32 folded biases and one int32 multiplier/int32 shift pair per
+    output channel for requantization;
+    \item compact JSON descriptors, a 12-byte header, and 16-byte alignment
+    padding.
+\end{itemize}
+
+For the selected W4/A6 mixed-precision artifact, ordinary weights are W4,
+depthwise weights are W6, and stem/classifier weights are W8. The byte-verified
+\texttt{deployable\_model.qpk} is 1,416,800 bytes (1.351 MiB), including
+292,632 bytes of metadata, versus 8,878,504 bytes for its folded FP32 weighted
+layer reference. This gives a 6.267$\times$ model-size reduction. The
+repository verifies that this analytical total equals the physical artifact
+length.
+
+Activation storage is measured for one $1\times3\times32\times32$ inference
+by tracing quantizer-boundary liveness. Residual operands remain live until
+their corresponding add. This produces 393,216 FP32 peak-live bytes versus
+73,732 quantized peak-live bytes; boundary traffic is 2,334,248 FP32 bytes
+versus 437,968 quantized bytes.
+
+\paragraph{PyTorch limitation.} This implementation is \emph{fake QAT}, not
+a benchmark of true integer inference. Although the forward pass simulates
+the intended low-bit codes through fake quantization, PyTorch's
+\texttt{conv2d} and \texttt{linear} still execute FP32 kernels on the
+dequantized tensors. The custom \texttt{QPK1} file contains packed codes and
+integer-oriented metadata, but this repository does not yet include an integer
+convolution runtime that consumes it. Consequently, the reported accuracy,
+storage, and activation-memory accounting are valid for the quantized model
+representation; no latency, throughput, or energy speed-up is claimed.
+
+\begin{thebibliography}{9}
+\bibitem{jacob2018quantization}
+B. Jacob, S. Kligys, B. Chen, M. Zhu, M. Tang, A. Howard, H. Adam, and
+D. Kalenichenko, Quantization and Training of Neural Networks for Efficient
+Integer-Arithmetic-Only Inference, \emph{CVPR}, 2018.
+\href{https://arxiv.org/abs/1712.05877}{arXiv:1712.05877}.
+
+\bibitem{esser2020lsq}
+S. K. Esser, J. L. McKinstry, D. Bablani, R. Appuswamy, and D. S. Modha,
+Learned Step Size Quantization, \emph{ICLR}, 2020.
+\href{https://openreview.net/forum?id=rkgO66VKDS}{OpenReview: rkgO66VKDS}.
+
+\bibitem{choi2018pact}
+J. Choi, Z. Wang, S. Venkataramani, P. I.-J. Chuang, V. Srinivasan, and
+K. Gopalakrishnan, PACT: Parameterized Clipping Activation for Quantized
+Neural Networks, 2018.
+\href{https://arxiv.org/abs/1805.06085}{arXiv:1805.06085}.
+\end{thebibliography}

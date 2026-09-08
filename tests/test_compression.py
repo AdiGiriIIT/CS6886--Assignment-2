@@ -3,8 +3,9 @@ import unittest
 import torch
 from torch import nn
 from src.compression import (QuantizedInvertedResidual, activation_liveness, build_quantized_model,
-                             export_packed_model, fold_batch_norms, fold_conv_bn, pack_signed,
-                             unpack_signed, weight_size_breakdown)
+                             export_packed_model, export_sparse_packed_model, fold_batch_norms, fold_conv_bn, pack_bitmap,
+                             pack_signed, unpack_bitmap, unpack_signed, weight_size_breakdown)
+from src.pruning import enforce_masks, global_magnitude_masks, validate_masks
 from src.qat import precision_for_epoch
 from src.quantization import (ActivationFakeQuantizer, QuantizedResidualAdd,
                               apply_mixed_weight_policy, fake_quantize, integer_range, lsq_scale_init,
@@ -86,5 +87,21 @@ class CompressionTests(unittest.TestCase):
         realized = apply_mixed_weight_policy(quant, 4, depthwise_bits=6,
                                              first_last_bits=8)
         self.assertEqual(list(realized.values()), [8, 6, 8])
+
+    def test_bitmap_and_sparse_export_are_byte_exact(self):
+        bitmap = pack_bitmap(torch.tensor([True, False, True, True, False, False, False, True, True]))
+        self.assertTrue(torch.equal(unpack_bitmap(bitmap, 9), torch.tensor([True, False, True, True, False, False, False, True, True])))
+        # The first convolution is 1x1 W4 and therefore the only eligible sparse tensor.
+        base = nn.Sequential(nn.Conv2d(3, 4, 1, bias=False), nn.BatchNorm2d(4), nn.ReLU6(), nn.Flatten(), nn.Linear(4 * 8 * 8, 2)).eval()
+        quant = build_quantized_model(base, 4, 6).eval(); quant(torch.randn(1, 3, 8, 8))
+        masks, expected = global_magnitude_masks(quant, .5); enforce_masks(quant, masks)
+        summary = validate_masks(quant, masks)
+        self.assertEqual(summary.masked_values, expected.masked_values)
+        with __import__("tempfile").TemporaryDirectory() as directory:
+            path = __import__("pathlib").Path(directory) / "sparse.qpk"
+            size = export_sparse_packed_model(quant, path, masks)
+            self.assertEqual(path.stat().st_size, size.total_bytes)
+            self.assertEqual(size.masked_weight_values, expected.masked_values)
+            self.assertGreater(size.bitmap_bytes, 0)
 
 if __name__ == "__main__": unittest.main()
